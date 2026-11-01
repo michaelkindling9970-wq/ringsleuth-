@@ -401,3 +401,12 @@ L.circle([m.lat,m.lon],{radius:m.radius_m,color:'#38bdf8',weight:1,fillOpacity:.
 
 if __name__ == "__main__":
     app.run(host="127.0.0.1", port=int(os.environ.get("PORT", 5055)))
+
+
+@app.route("/<fname>.html")
+def google_verification_file(fname):
+    """Serve the Google Search Console HTML-file verification (name set via env)."""
+    want = os.environ.get("GOOGLE_SITE_VERIFICATION", "").strip()
+    if want.endswith(".html") and want == fname + ".html" and fname.startswith("google"):
+        return Response(f"google-site-verification: {want}", mimetype="text/html")
+    abort(404)

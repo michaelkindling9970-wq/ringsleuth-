@@ -195,3 +195,79 @@ def test_fcra_gate(tmp_path, monkeypatch):
     assert c.post("/lookup", data={"number": "2125550100"}).status_code == 200
     files = list((tmp_path / "gate_records").rglob("*.txt")); assert len(files) == 1
     txt = files[0].read_text(); assert "g@x.com" in txt and A.GATE_NOTICE in txt and A.GATE_BUTTON in txt
+
+
+# ---------- geo scoping ----------
+def _geo_csv(d):
+    h = "Company_Phone_Number,Created_Date,Violation_Date,Consumer_City,Consumer_State,Consumer_Area_Code,Subject,Recorded_Message_Or_Robocall\n"
+    t = d.isoformat()
+    return h + "".join(f"{n},{t} 01:00:00,,X,Ohio,614,Other,{r}\n" for n, r in
+                       [("8337661884", "Y"), ("7209534126", "N"), ("2125550111", "N"), ("3105550100", "N"), ("3105550100", "N"), ("3105550100", "N")])
+
+@pytest.fixture
+def geodb(tmp_path, monkeypatch):
+    p = str(tmp_path / "ftc.db")
+    A.ftc_data.build(days=1, today=date(2026, 10, 30), fetch=lambda d: _geo_csv(d) if d == date(2026, 10, 30) else None, path=p)
+    monkeypatch.setattr(A.ftc_data, "DB_PATH", p); A.geoloc.clear_caches()
+    yield p
+    A.geoloc.clear_caches()
+
+def test_geo_area_code_mapping():
+    co = A.geoloc.area_codes_for("CO"); assert {"303", "720", "719", "970"} <= set(co) and "212" not in co
+    assert {"212", "718", "917"} <= set(A.geoloc.area_codes_for("NY"))
+    assert A.geoloc.area_codes_for("XX") == []
+
+def test_client_ip_and_region_cache():
+    h = {"X-Forwarded-For": "10.0.0.1, 8.8.8.8, 1.1.1.1"}
+    assert A.geoloc.client_ip(h, "127.0.0.1") == "8.8.8.8"
+    assert A.geoloc.client_ip({}, "127.0.0.1") is None
+    calls = []
+    A.geoloc.clear_caches()
+    assert A.geoloc.region_for_ip("8.8.8.8", resolver=lambda ip: calls.append(ip) or "CO") == "CO"
+    assert A.geoloc.region_for_ip("8.8.8.8", resolver=lambda ip: calls.append(ip) or "NY") == "CO" and len(calls) == 1
+    assert all("8.8.8.8" not in k for k in A.geoloc._ip_cache)  # raw IP never used as key
+
+def test_geo_fallback_on_failure(client, geodb, monkeypatch):
+    def boom(ip): raise TimeoutError()
+    assert A.geoloc.region_for_ip("9.9.9.9", resolver=boom) is None
+    monkeypatch.setattr(A.geoloc, "region_for_ip", lambda ip, **k: None)
+    monkeypatch.setenv("GEO_STRICT", "1")
+    b = do(client, "2125550111").get_data(as_text=True)
+    assert "Reported to the FTC 1 time" in b and not A.geoloc._region_cache  # no preload, on-demand
+
+def test_region_cache_holds_only_local_rows(geodb):
+    r = A.lookup_provider.lookup("7209534126", region="CO")
+    assert r["ftc_count"] == 1 and set(A.geoloc._region_cache["CO"]) == {"7209534126"}
+
+def test_nonlocal_on_demand_when_not_strict(geodb, monkeypatch):
+    monkeypatch.delenv("GEO_STRICT", raising=False)
+    r = A.lookup_provider.lookup("2125550111", region="CO")
+    assert r["ftc_count"] == 1 and not r.get("geo_hidden")
+
+def test_strict_hides_nonlocal_nonspam(geodb, monkeypatch):
+    monkeypatch.setenv("GEO_STRICT", "1")
+    r = A.lookup_provider.lookup("2125550111", region="CO")
+    assert r["geo_hidden"] and "outside your area" in r["source"]
+    assert not A.lookup_provider.lookup("7209534126", region="CO").get("geo_hidden")
+
+def test_known_spam_always_served_even_strict(geodb, monkeypatch):
+    monkeypatch.setenv("GEO_STRICT", "1")
+    robo = A.lookup_provider.lookup("8337661884", region="CO")   # robocall-flagged, out of area
+    assert not robo.get("geo_hidden") and "robocall yes" in robo["ftc"] and robo["ftc_count"] == 1
+    heavy = A.lookup_provider.lookup("3105550100", region="CO")  # high complaint count, out of area
+    assert not heavy.get("geo_hidden") and heavy["ftc_count"] == 3 and heavy["spam_score"] > 0
+
+def test_gate_records_have_no_ip(client, tmp_path, monkeypatch):
+    import os
+    monkeypatch.setenv("DATA_DIR", str(tmp_path))
+    client.post("/lookup/gate", environ_base={"REMOTE_ADDR": "8.8.4.4"}, headers={"X-Forwarded-For": "8.8.4.4"})
+    for root, _, fs in os.walk(tmp_path):
+        for f in fs:
+            if f.endswith(".txt"): assert "8.8.4.4" not in open(os.path.join(root, f)).read()
+
+def test_stale_lock_taken_over(tmp_path):
+    import os, time
+    lf = str(tmp_path / "x.building")
+    open(lf, "w").write("999999"); os.utime(lf, (time.time() - 4000,) * 2)
+    assert A.ftc_data.acquire_file_lock(lf)
+    assert not A.ftc_data.acquire_file_lock(lf)  # held by live pid (us)

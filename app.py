@@ -55,7 +55,9 @@ def cycle_bounds(sub_start, today):
 # ---------- real lookup: phonenumbers (offline) + FTC Do Not Call complaints ----------
 import ftc_data
 import phonenumbers
-from phonenumbers import carrier as pn_carrier, geocoder as pn_geocoder, timezone as pn_timezone
+from phonenumbers import carrier as pn_carrier, timezone as pn_timezone
+# libphonenumber's geocoder module loads every language's data (~100MB RSS); a US-only NPA snapshot is used instead
+NPA_GEO = _json.load(open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "npa_geo.json")))
 
 def spam_score(count):
     """Spam score from real FTC complaint counts only: 0 -> 0, 1 -> 25, 3 -> 50, 7 -> 75, 15+ -> 99."""
@@ -72,7 +74,7 @@ class RealLookup:
             phonenumbers.PhoneNumberType.PERSONAL_NUMBER: "Personal number", phonenumbers.PhoneNumberType.PAGER: "Pager",
             phonenumbers.PhoneNumberType.UAN: "Company number", phonenumbers.PhoneNumberType.VOICEMAIL: "Voicemail"}
 
-    def lookup(self, number):
+    def lookup(self, number, region=None):
         digits = "".join(c for c in number if c.isdigit())
         if len(digits) == 10: digits = "1" + digits
         if len(digits) != 11 or digits[0] != "1": raise ValueError("Enter a 10-digit US number.")
@@ -80,9 +82,20 @@ class RealLookup:
         npa, d10 = digits[1:4], digits[1:]
         valid = phonenumbers.is_valid_number(p)
         a = area_info(npa)
-        geo = pn_geocoder.description_for_number(p, "en") if valid else ""
+        geo = NPA_GEO.get(npa, "") if valid else ""
         tzs = [t for t in pn_timezone.time_zones_for_number(p) if t != "Etc/Unknown"] if valid else []
-        f = ftc_data.lookup(d10)
+        local_npas = geoloc.area_codes_for(region) if region else []
+        local = npa in local_npas
+        cache = geoloc.region_cache(region, ftc_data.lookup_many) if region else None
+        f = cache.get(d10) if (cache is not None and local) else None
+        if f is None: f = ftc_data.lookup(d10)  # on demand from SQLite on disk
+        known_spam = bool(f and (f["robocall"] or f["count"] >= SPAM_LIST_MIN))
+        if geoloc.strict() and region and not local and not known_spam:
+            return {"number": f"+1 ({npa}) {digits[4:7]}-{digits[7:]}", "npa": npa, "valid": valid, "geo_hidden": True,
+                    "caller_name": "Not shown", "carrier": "Not shown", "line_type": "Not shown",
+                    "location": f"Outside your area ({geoloc.US_STATES.get(region, region)})", "timezone": "",
+                    "ftc": "", "ftc_count": 0, "spam_score": 0, "risk": "Not shown",
+                    "source": f"Local-only mode: results are limited to area codes in {geoloc.US_STATES.get(region, region)}. This number is outside your area and is not on the known spam/robocall list."}
         score = spam_score(f["count"] if f else 0)
         if f:
             ftc = f"Reported to the FTC {f['count']} time{'s' if f['count'] != 1 else ''}, last on {datetime.strptime(f['last'], '%Y-%m-%d').strftime('%b %-d, %Y')}, robocall {'yes' if f['robocall'] else 'no'}" + (f", topic: {f['topic']}" if f["topic"] else "")
@@ -98,6 +111,8 @@ class RealLookup:
                 "spam_score": score, "risk": "High" if score >= 70 else "Medium" if score >= 40 else "Low",
                 "source": "Sources: FTC Do Not Call complaints (unverified consumer reports) · libphonenumber open numbering data"}
 
+SPAM_LIST_MIN = int(os.environ.get("SPAM_LIST_MIN", "3"))  # FTC complaint count that puts a number on the known-spam list
+import geo as geoloc
 lookup_provider = RealLookup()
 
 # ---------- app/db ----------
@@ -299,7 +314,9 @@ def lookup():
             err = f"You've used all {LOOKUP_CAP} of your {LOOKUP_CAP} lookups for this month. Your plan includes {LOOKUP_CAP} lookups per billing cycle; your limit resets on {reset.strftime('%B %-d, %Y')}."
         else:
             try:
-                result = lookup_provider.lookup(request.form.get("number", ""))
+                try: region = geoloc.region_for_ip(geoloc.client_ip(request.headers, request.remote_addr))
+                except Exception: region = None  # fallback: no preload, on-demand lookup
+                result = lookup_provider.lookup(request.form.get("number", ""), region=region)
                 import json
                 db().execute("INSERT INTO lookups(user_id,number,result,day,ts) VALUES(?,?,?,?,?)",
                              (u["id"], result["number"], json.dumps(result), today_fn().isoformat(), datetime.now().isoformat(timespec="seconds")))

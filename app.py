@@ -8,6 +8,24 @@ LOOKUP_CAP = 50
 PRICE = "4.99"
 COUNTDOWN_SECONDS = 15
 
+# Approximate city centroids for sample data (area-code region, never a person's location)
+AREA_COORDS = {"New York, NY": (40.7128, -74.0060), "Miami, FL": (25.7617, -80.1918), "Austin, TX": (30.2672, -97.7431),
+               "Denver, CO": (39.7392, -104.9903), "Seattle, WA": (47.6062, -122.3321), "Columbus, OH": (39.9612, -82.9988)}
+HUBS = {"Ashburn, VA": (39.0438, -77.4874), "Chicago, IL": (41.8781, -87.6298), "Dallas, TX": (32.7767, -96.7970),
+        "Los Angeles, CA": (34.0522, -118.2437), "New York, NY": (40.7128, -74.0060), "Atlanta, GA": (33.7490, -84.3880),
+        "Denver, CO": (39.7392, -104.9903), "Seattle, WA": (47.6062, -122.3321)}
+
+def map_data(location):
+    import math
+    city = location.split(" (")[0]
+    if city not in AREA_COORDS: return None
+    o = AREA_COORDS[city]
+    d = lambda p: math.hypot(p[0] - o[0], (p[1] - o[1]) * math.cos(math.radians(o[0])))
+    near = [h for h in sorted(HUBS, key=lambda h: d(HUBS[h])) if HUBS[h] != o][:2]
+    dest = "Ashburn, VA" if "Ashburn, VA" not in near else "Chicago, IL"
+    nodes = [{"name": n, "lat": HUBS[n][0], "lon": HUBS[n][1]} for n in near + [dest]]
+    return {"city": city, "lat": o[0], "lon": o[1], "radius_m": 25000, "nodes": nodes}
+
 
 # ---------- billing cycle logic ----------
 def add_months(d, n, anchor_day):
@@ -83,6 +101,7 @@ a{color:#38bdf8}.card{background:#1e293b;padding:18px;border-radius:12px;margin:
 input,button{padding:9px;border-radius:8px;border:0;margin:4px 0}button{background:#38bdf8;font-weight:bold;cursor:pointer}
 .banner{background:#facc15;color:#000;padding:6px;text-align:center;border-radius:6px}.err{background:#7f1d1d;padding:12px;border-radius:8px}
 table{width:100%}td{padding:4px}
+#map{height:300px;width:100%;border-radius:10px;margin-top:10px}.maplegend{font-size:12px;color:#94a3b8}
 #countdown{font-size:20px;font-weight:bold;text-align:center}</style></head><body>
 <div class=banner>DEMO / TEST MODE — no real charges · sample data only</div>
 <h1>📞 RingSleuth</h1><nav><a href="/">Home</a> · {% if u %}<a href="/lookup">Lookup</a> · <a href="/history">History</a> · <a href="/logout">Log out ({{u.email}})</a>{% else %}<a href="/signup">Sign up</a> · <a href="/login">Log in</a>{% endif %}</nav>
@@ -164,11 +183,22 @@ def lookup():
 {% if r %}<div class=card id=interstitial><p id=countdown>Your result is ready in <span id=cd-n>{{cd}}</span>…</p>
 <p style="text-align:center"><button id=show-btn type=button disabled>Show result</button></p></div>
 <div class=card id=result style="display:none"><h3>{{r.number}}</h3><table><tr><td>Caller ID</td><td>{{r.caller_name}}</td></tr><tr><td>Carrier</td><td>{{r.carrier}}</td></tr>
-<tr><td>Line type</td><td>{{r.line_type}}</td></tr><tr><td>Location</td><td>{{r.location}}</td></tr><tr><td>Spam risk</td><td>{{r.risk}} ({{r.spam_score}}/100)</td></tr></table><small>{{r.source}}</small></div>
+<tr><td>Line type</td><td>{{r.line_type}}</td></tr><tr><td>Location</td><td>{{r.location}}</td></tr><tr><td>Spam risk</td><td>{{r.risk}} ({{r.spam_score}}/100)</td></tr></table><small>{{r.source}}</small>
+{% if m %}<h4>Map</h4><p class=maplegend>📍 <b>Approximate area (from number registration, not live location)</b> — ~25 km circle around {{m.city}}<br>
+<span style="color:#f472b6">- - -</span> <b>Illustrative routing - not actual carrier trunk data</b></p><div id=map></div>
+<link rel=stylesheet href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" crossorigin="">
+<style>@keyframes dash{to{stroke-dashoffset:-40}}.callpath{animation:dash 1.2s linear infinite}</style>
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" crossorigin=""></script>
+<script>window.RS_MAP={{ m|tojson }};window.drawMap=function(){var m=RS_MAP;if(window._mapDone||!window.L)return;window._mapDone=1;
+var map=L.map('map',{scrollWheelZoom:false});L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',{maxZoom:12,attribution:'&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'}).addTo(map);
+var o=[m.lat,m.lon];L.circle(o,{radius:m.radius_m,color:'#38bdf8',fillOpacity:.25}).addTo(map).bindTooltip('Approximate area (from number registration, not live location)',{permanent:true,direction:'top'});
+var pts=[o];m.nodes.forEach(function(n,i){var p=[n.lat,n.lon];pts.push(p);L.circleMarker(p,{radius:6,color:'#f472b6',fillOpacity:1}).addTo(map).bindTooltip((i==m.nodes.length-1?'Destination node: ':'Hub: ')+n.name+' (illustrative)');});
+L.polyline(pts,{color:'#f472b6',weight:3,dashArray:'8 12',className:'callpath'}).addTo(map).bindTooltip('Illustrative call path - not actual carrier trunk data',{sticky:true});
+map.fitBounds(L.latLngBounds(pts).pad(.2));};</script>{% endif %}</div>
 <noscript><style>#result{display:block!important}#countdown,#show-btn{display:none}</style></noscript>
 <script>(function(){var n={{cd}},el=document.getElementById('cd-n'),b=document.getElementById('show-btn'),p=document.getElementById('countdown');
-function reveal(){document.getElementById('result').style.display='block';b.style.display='none';p.textContent='Your result is ready.';}
-b.onclick=reveal;var t=setInterval(function(){n--;if(n>0){el.textContent=n;}else{clearInterval(t);p.textContent='Your result is ready.';b.disabled=false;reveal();}},1000);})();</script>{% endif %}""", err=err, r=result), status
+function reveal(){document.getElementById('result').style.display='block';if(window.drawMap)setTimeout(drawMap,50);b.style.display='none';p.textContent='Your result is ready.';}
+b.onclick=reveal;var t=setInterval(function(){n--;if(n>0){el.textContent=n;}else{clearInterval(t);p.textContent='Your result is ready.';b.disabled=false;reveal();}},1000);})();</script>{% endif %}""", err=err, r=result, m=map_data(result["location"]) if result else None), status
 
 @app.route("/history")
 def history():

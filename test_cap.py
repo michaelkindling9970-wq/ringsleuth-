@@ -51,3 +51,14 @@ def test_countdown_no_ads(client):
     assert "Your result is ready in" in b and 'id=result' in b
     for bad in ("Advertisement", "Ad space", "adsbygoogle", "googlesyndication", "ad-slot"): assert bad not in b
     assert client.get("/ads.txt").status_code == 404
+
+def test_map_markup(client):
+    b = do(client).get_data(as_text=True)
+    for s in ("id=map", "leaflet@1.9.4", "openstreetmap.org/copyright", "Approximate area (from number registration, not live location)",
+              "Illustrative routing - not actual carrier trunk data", "Illustrative call path", "radius_m"): assert s in b
+    assert "google" not in b.lower()
+
+def test_map_data_approximate():
+    for city in A.AREA_COORDS:
+        m = A.map_data(city + " (area code region)")
+        assert m["radius_m"] == 25000 and len(m["nodes"]) == 3 and m["nodes"][-1]["name"] in ("Ashburn, VA", "Chicago, IL")

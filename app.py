@@ -73,7 +73,7 @@ class MockTwilioLookup:
                 "npa": digits[1:4],
                 "spam_score": score,
                 "risk": "High" if score >= 70 else "Medium" if score >= 40 else "Low",
-                "source": "SAMPLE DATA (mock)"}
+                "source": "SAMPLE DATA"}
 
 lookup_provider = MockTwilioLookup()
 

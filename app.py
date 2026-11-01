@@ -193,10 +193,42 @@ def login():
 def logout():
     session.clear(); return redirect("/")
 
+# ---------- Stripe switch (TEST MODE ONLY; off by default) ----------
+import logging
+log = logging.getLogger("ringsleuth")
+
+def stripe_mode():
+    """Return 'real' only if CHECKOUT_ENABLED=1 and a sk_test_ key is set; otherwise 'fake'. Live keys are refused."""
+    if os.environ.get("CHECKOUT_ENABLED", "").strip().lower() not in ("1", "true", "yes", "on"): return "fake"
+    key = os.environ.get("STRIPE_SECRET_KEY", "").strip()
+    if key.startswith("sk_live_") or key.startswith("rk_live_"):
+        log.warning("STRIPE_SECRET_KEY is a LIVE key; refusing to use it. Fake checkout stays on (test mode only).")
+        return "fake"
+    if not key.startswith("sk_test_"): return "fake"
+    return "real"
+
+def _stripe():
+    import stripe
+    key = os.environ["STRIPE_SECRET_KEY"].strip()
+    if not key.startswith("sk_test_"): raise RuntimeError("Refusing non-test Stripe key")
+    stripe.api_key = key
+    return stripe
+
 @app.route("/checkout", methods=["GET", "POST"])
 def checkout():
     u = user()
     if not u: return redirect("/login")
+    if stripe_mode() == "real":
+        if request.method == "POST":
+            stripe = _stripe(); base = request.host_url.rstrip("/")
+            pid = os.environ.get("STRIPE_PRICE_ID", "").strip()
+            item = {"price": pid, "quantity": 1} if pid else {"quantity": 1, "price_data": {"currency": "usd", "unit_amount": 499,
+                    "recurring": {"interval": "month"}, "product_data": {"name": "RingSleuth monthly"}}}
+            cs = stripe.checkout.Session.create(mode="subscription", line_items=[item], client_reference_id=str(u["id"]),
+                    customer_email=u["email"], success_url=base + "/checkout/success?session_id={CHECKOUT_SESSION_ID}", cancel_url=base + "/checkout/cancel")
+            return redirect(cs.url, code=303)
+        return page("""<div class=card><h1>Subscribe — ${{price}}/month</h1><p>Secure checkout by Stripe (<b>test mode</b>).</p>
+<form method=post><button>Continue to checkout</button></form></div>""", price=PRICE, seo=seo_ctx("Checkout | RingSleuth", "Checkout.", index=False))
     if request.method == "POST":  # MOCK Stripe test-mode checkout: no network, no charge
         if request.form.get("card", "").replace(" ", "") != "4242424242424242":
             return page("<h1>Checkout</h1><p class=err>Test mode: use card 4242 4242 4242 4242.</p><a href=/checkout>Back</a>")
@@ -310,7 +342,7 @@ def local_time(tz):
 
 @app.after_request
 def robots_header(resp):
-    if not SEO_INDEXABLE() or request.path.startswith(("/lookup", "/history", "/checkout", "/login", "/signup", "/logout")):
+    if not SEO_INDEXABLE() or request.path.startswith(("/lookup", "/history", "/checkout", "/stripe", "/login", "/signup", "/logout")):
         resp.headers["X-Robots-Tag"] = "noindex, nofollow"
     return resp
 
@@ -398,6 +430,38 @@ def area_page(npa):
 L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png',{maxZoom:12,className:'darktiles',attribution:'&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'}).addTo(map);
 L.circle([m.lat,m.lon],{radius:m.radius_m,color:'#38bdf8',weight:1,fillOpacity:.2}).addTo(map).bindTooltip('Approximate area: '+m.city+' (not a live location)');})();</script>""",
         npa=npa, a=a, country=country, tzl=tzl, lt=lt, overlay=overlay, same=same, faq=faq, m=m, seo=seo)
+
+def _mark_subscribed(uid):
+    db().execute("UPDATE users SET sub_start=COALESCE(sub_start, ?) WHERE id=?", (today_fn().isoformat(), int(uid))); db().commit()
+
+@app.route("/checkout/success")
+def checkout_success():
+    u = user()
+    if not u: return redirect("/login")
+    sid = request.args.get("session_id", "")
+    if stripe_mode() == "real" and sid:
+        try:
+            cs = _stripe().checkout.Session.retrieve(sid)
+            if str(cs.client_reference_id) == str(u["id"]) and cs.status == "complete": _mark_subscribed(u["id"])
+        except Exception as e: log.warning("checkout success lookup failed: %s", e)
+    return page("<div class=card><h1>Thanks!</h1><p>Your subscription is being activated.</p><a href=/lookup>Start a lookup</a></div>", seo=seo_ctx("Subscribed | RingSleuth", "Subscribed.", index=False))
+
+@app.route("/checkout/cancel")
+def checkout_cancel():
+    return page("<div class=card><h1>Checkout canceled</h1><p>No charge was made.</p><a href=/checkout>Try again</a></div>", seo=seo_ctx("Checkout canceled | RingSleuth", "Canceled.", index=False))
+
+@app.route("/stripe/webhook", methods=["POST"])
+def stripe_webhook():
+    if stripe_mode() != "real": abort(404)
+    stripe = _stripe(); payload = request.get_data(); secret = os.environ.get("STRIPE_WEBHOOK_SECRET", "").strip()
+    try:
+        if secret: event = stripe.Webhook.construct_event(payload, request.headers.get("Stripe-Signature", ""), secret)
+        else: event = _json.loads(payload)
+    except Exception: abort(400)
+    if event["type"] == "checkout.session.completed":
+        obj = event["data"]["object"]; uid = obj.get("client_reference_id")
+        if uid and str(uid).isdigit(): _mark_subscribed(uid)
+    return {"received": True}
 
 if __name__ == "__main__":
     app.run(host="127.0.0.1", port=int(os.environ.get("PORT", 5055)))

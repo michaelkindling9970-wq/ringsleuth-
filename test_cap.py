@@ -52,7 +52,8 @@ def test_countdown_no_ads(client):
     for bad in ("Advertisement", "Ad space", "adsbygoogle", "googlesyndication", "ad-slot"): assert bad not in b
     assert client.get("/ads.txt").status_code == 404
 
-def test_map_markup(client):
+def test_map_markup(client, monkeypatch):
+    monkeypatch.delenv("GOOGLE_SITE_VERIFICATION", raising=False)
     b = do(client).get_data(as_text=True)
     for s in ("id=map", "leaflet@1.9.4", "openstreetmap.org/copyright", "darktiles", "prefers-reduced-motion", "class=legend", "Approximate area (from number registration, not live location)",
               "Illustrative routing - not actual carrier trunk data", "Illustrative call path", "radius_m"): assert s in b
@@ -101,3 +102,36 @@ def test_area_pages(client):
     assert "Sitemap:" in client.get("/robots.txt").get_data(as_text=True)
     assert client.get("/favicon.svg").status_code == 200
     assert client.get("/area-code/search?q=412").headers["Location"].endswith("/area-code/412")
+
+
+# ---------- Stripe switch ----------
+from unittest import mock
+
+def test_checkout_off_is_fake(client, monkeypatch):
+    for k in ("CHECKOUT_ENABLED", "STRIPE_SECRET_KEY"): monkeypatch.delenv(k, raising=False)
+    assert A.stripe_mode() == "fake"
+    c = A.app.test_client(); c.post("/signup", data={"email": "f@x.com", "password": "secret1"})
+    assert "4242 4242 4242 4242" in c.get("/checkout").get_data(as_text=True)
+    assert c.post("/stripe/webhook", data="{}").status_code == 404
+
+def test_live_key_refused(monkeypatch):
+    monkeypatch.setenv("CHECKOUT_ENABLED", "1"); monkeypatch.setenv("STRIPE_SECRET_KEY", "sk_live_abc")
+    assert A.stripe_mode() == "fake"
+    monkeypatch.setenv("STRIPE_SECRET_KEY", ""); assert A.stripe_mode() == "fake"
+
+def test_checkout_on_mocked(tmp_path, monkeypatch):
+    monkeypatch.setenv("CHECKOUT_ENABLED", "1"); monkeypatch.setenv("STRIPE_SECRET_KEY", "sk_test_abc")
+    monkeypatch.delenv("STRIPE_PRICE_ID", raising=False); monkeypatch.delenv("STRIPE_WEBHOOK_SECRET", raising=False)
+    A.app.config.update(DATABASE=str(tmp_path / "s.db"), TESTING=True)
+    c = A.app.test_client(); c.post("/signup", data={"email": "s@x.com", "password": "secret1"})
+    fake = mock.MagicMock(); fake.checkout.Session.create.return_value = mock.Mock(url="https://checkout.stripe.com/c/pay/cs_test_1")
+    with mock.patch.object(A, "_stripe", return_value=fake):
+        assert "Continue to checkout" in c.get("/checkout").get_data(as_text=True)
+        r = c.post("/checkout"); assert r.status_code == 303 and r.headers["Location"].startswith("https://checkout.stripe.com")
+        kw = fake.checkout.Session.create.call_args.kwargs
+        assert kw["mode"] == "subscription" and kw["line_items"][0]["price_data"]["unit_amount"] == 499
+        assert c.post("/lookup", data={"number": "2125550100"}).status_code == 302
+        ev = {"type": "checkout.session.completed", "data": {"object": {"client_reference_id": kw["client_reference_id"]}}}
+        assert c.post("/stripe/webhook", json=ev).status_code == 200
+        assert c.post("/lookup", data={"number": "2125550100"}).status_code == 200
+    assert c.get("/checkout/cancel").status_code == 200

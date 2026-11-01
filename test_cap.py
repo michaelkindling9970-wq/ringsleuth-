@@ -46,16 +46,8 @@ def test_no_people_search_fields():
     r = A.lookup_provider.lookup("3055550199")
     assert set(r) == {"number","caller_name","carrier","line_type","location","spam_score","risk","source"}
 
-def test_countdown_and_placeholder(client, monkeypatch):
-    monkeypatch.delenv("ADSENSE_CLIENT", raising=False); monkeypatch.delenv("ADSENSE_SLOT", raising=False)
+def test_countdown_no_ads(client):
     b = do(client).get_data(as_text=True)
-    assert "Your result is ready in" in b and 'id=ad-slot' in b and "Ad space" in b
-    assert "adsbygoogle" not in b and "watch" not in b.lower()
+    assert "Your result is ready in" in b and 'id=result' in b
+    for bad in ("Advertisement", "Ad space", "adsbygoogle", "googlesyndication", "ad-slot"): assert bad not in b
     assert client.get("/ads.txt").status_code == 404
-
-def test_adsense_enabled(client, monkeypatch):
-    monkeypatch.setenv("ADSENSE_CLIENT", "ca-pub-1234567890123456"); monkeypatch.setenv("ADSENSE_SLOT", "9876543210")
-    b = do(client).get_data(as_text=True)
-    assert 'data-ad-client="ca-pub-1234567890123456"' in b and 'data-ad-slot="9876543210"' in b and "Ad space" not in b
-    t = client.get("/ads.txt").get_data(as_text=True)
-    assert t.strip() == "google.com, pub-1234567890123456, DIRECT, f08c47fec0942fa0"

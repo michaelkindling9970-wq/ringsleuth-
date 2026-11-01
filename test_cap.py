@@ -73,3 +73,31 @@ def test_unknown_area_code(client):
 def test_814_lookup(client):
     b = do(client, "8145550123").get_data(as_text=True)
     assert "Johnstown" in b and "area code 814" in b
+
+def test_seo_noindex_default(client, monkeypatch):
+    monkeypatch.delenv("SEO_INDEXABLE", raising=False); monkeypatch.setenv("GOOGLE_SITE_VERIFICATION", "abc123")
+    r = client.get("/"); b = r.get_data(as_text=True)
+    assert r.headers["X-Robots-Tag"] == "noindex, nofollow" and 'content="noindex,nofollow"' in b
+    assert '<meta name="google-site-verification" content="abc123">' in b
+    assert b.count("<h1") == 1 and "rel=canonical" in b and "og:title" in b and "twitter:card" in b
+    assert '"SearchAction"' in b and '"FAQPage"' in b and "DEMO / TEST MODE" in b
+    assert "google" not in b.lower().replace("google-site-verification", "")
+
+def test_seo_indexable_flag(client, monkeypatch):
+    monkeypatch.setenv("SEO_INDEXABLE", "1")
+    r = client.get("/area-code/814"); b = r.get_data(as_text=True)
+    assert "X-Robots-Tag" not in r.headers and 'content="index,follow"' in b
+    assert client.get("/lookup").headers["X-Robots-Tag"] == "noindex, nofollow"
+
+def test_area_pages(client):
+    b = client.get("/area-code/814").get_data(as_text=True)
+    assert "<title>814 Area Code" in b and "Johnstown" in b and "Eastern Time" in b and b.count("<h1") == 1 and '"FAQPage"' in b
+    assert "Approximate area (from number registration, not live location)" in b
+    assert client.get("/area-code/999").status_code == 404
+    idx = client.get("/area-code/").get_data(as_text=True)
+    assert all(f'href="/area-code/{n}"' in idx for n in A.AREA_CODES)
+    sm = client.get("/sitemap.xml").get_data(as_text=True)
+    assert sm.count("<loc>") == len(A.AREA_CODES) + 2
+    assert "Sitemap:" in client.get("/robots.txt").get_data(as_text=True)
+    assert client.get("/favicon.svg").status_code == 200
+    assert client.get("/area-code/search?q=412").headers["Location"].endswith("/area-code/412")

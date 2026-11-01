@@ -1,4 +1,4 @@
-"""RingSleuth STAGING prototype. Mock data only. No real Twilio/Stripe calls."""
+"""RingSleuth. Lookups use real free data (libphonenumber + FTC Do Not Call complaints). Checkout is test-mode only."""
 import calendar, hashlib, os, sqlite3
 from datetime import date, datetime
 from flask import Flask, Response, abort, g, redirect, render_template_string, request, session, url_for
@@ -52,34 +52,57 @@ def cycle_bounds(sub_start, today):
         start = add_months(sub_start, n, sub_start.day)
     return start, add_months(sub_start, n + 1, sub_start.day)
 
-# ---------- mock Twilio Lookup adapter ----------
-class MockTwilioLookup:
-    """Stand-in for Twilio Lookup v2 (caller_name, line_type_intelligence). Never hits the network."""
-    NAMES = ["WIRELESS CALLER", "ACME PLUMBING LLC", "PRIVATE CALLER", "CITY CLINIC", "UNKNOWN", "TELEMARKETING SVC"]
-    CARRIERS = ["Verizon Wireless", "T-Mobile USA", "AT&T Mobility", "Bandwidth.com (VoIP)", "Comcast Phone", "Google Voice"]
-    TYPES = ["mobile", "landline", "voip"]
+# ---------- real lookup: phonenumbers (offline) + FTC Do Not Call complaints ----------
+import ftc_data
+import phonenumbers
+from phonenumbers import carrier as pn_carrier, geocoder as pn_geocoder, timezone as pn_timezone
+
+def spam_score(count):
+    """Spam score from real FTC complaint counts only: 0 -> 0, 1 -> 25, 3 -> 50, 7 -> 75, 15+ -> 99."""
+    import math
+    return 0 if not count else min(99, round(25 * math.log2(count + 1)))
+
+class RealLookup:
+    """Validity, line type, region, original carrier and time zone from Google's libphonenumber data (offline);
+    complaint history from the FTC Do Not Call data set. No caller-name (CNAM) source; no data about individuals."""
+    LINE = {phonenumbers.PhoneNumberType.MOBILE: "Cell", phonenumbers.PhoneNumberType.FIXED_LINE: "Landline",
+            phonenumbers.PhoneNumberType.FIXED_LINE_OR_MOBILE: "Cell or landline (US numbers can't be told apart offline)",
+            phonenumbers.PhoneNumberType.VOIP: "VoIP", phonenumbers.PhoneNumberType.TOLL_FREE: "Toll-free",
+            phonenumbers.PhoneNumberType.PREMIUM_RATE: "Premium rate", phonenumbers.PhoneNumberType.SHARED_COST: "Shared cost",
+            phonenumbers.PhoneNumberType.PERSONAL_NUMBER: "Personal number", phonenumbers.PhoneNumberType.PAGER: "Pager",
+            phonenumbers.PhoneNumberType.UAN: "Company number", phonenumbers.PhoneNumberType.VOICEMAIL: "Voicemail"}
 
     def lookup(self, number):
         digits = "".join(c for c in number if c.isdigit())
         if len(digits) == 10: digits = "1" + digits
-        if len(digits) != 11: raise ValueError("Enter a 10-digit US number.")
-        h = int(hashlib.sha256(digits.encode()).hexdigest(), 16)
-        lt = self.TYPES[h % 3]
-        score = (h >> 8) % 100
-        if lt == "voip": score = min(99, score + 20)
-        return {"number": f"+{digits[0]} ({digits[1:4]}) {digits[4:7]}-{digits[7:]}",
-                "caller_name": self.NAMES[(h >> 16) % 6], "carrier": self.CARRIERS[(h >> 24) % 6],
-                "line_type": {"mobile": "Cell", "landline": "Landline", "voip": "VoIP"}[lt],
-                "location": (lambda a: f"{a['city']}, {a['region']} (area code {digits[1:4]} region)" if a else f"Unknown (area code {digits[1:4]})")(area_info(digits[1:4])),
-                "npa": digits[1:4],
-                "spam_score": score,
-                "risk": "High" if score >= 70 else "Medium" if score >= 40 else "Low",
-                "source": "SAMPLE DATA"}
+        if len(digits) != 11 or digits[0] != "1": raise ValueError("Enter a 10-digit US number.")
+        p = phonenumbers.parse("+" + digits)
+        npa, d10 = digits[1:4], digits[1:]
+        valid = phonenumbers.is_valid_number(p)
+        a = area_info(npa)
+        geo = pn_geocoder.description_for_number(p, "en") if valid else ""
+        tzs = [t for t in pn_timezone.time_zones_for_number(p) if t != "Etc/Unknown"] if valid else []
+        f = ftc_data.lookup(d10)
+        score = spam_score(f["count"] if f else 0)
+        if f:
+            ftc = f"Reported to the FTC {f['count']} time{'s' if f['count'] != 1 else ''}, last on {datetime.strptime(f['last'], '%Y-%m-%d').strftime('%b %-d, %Y')}, robocall {'yes' if f['robocall'] else 'no'}" + (f", topic: {f['topic']}" if f["topic"] else "")
+        elif not ftc_data.info().get("built"): ftc = "FTC complaint data is still loading; try again in a minute"
+        else: ftc = "No FTC complaints on file"
+        return {"number": f"+1 ({npa}) {digits[4:7]}-{digits[7:]}", "npa": npa, "valid": valid,
+                "caller_name": "Caller name not available",
+                "carrier": (pn_carrier.name_for_number(p, "en") if valid else "") or "Not available",
+                "line_type": self.LINE.get(phonenumbers.number_type(p), "Unknown") if valid else "Not a valid US number",
+                "location": (f"{a['city']}, {a['region']} (area code {npa} region)" if a and valid else f"{geo} (area code {npa} region)" if geo else f"Unknown (area code {npa})"),
+                "timezone": tz_label(tzs[0]) if len(tzs) == 1 else "Varies (not tied to one time zone)" if tzs else "Not available",
+                "ftc": ftc, "ftc_count": f["count"] if f else 0,
+                "spam_score": score, "risk": "High" if score >= 70 else "Medium" if score >= 40 else "Low",
+                "source": "Sources: FTC Do Not Call complaints (unverified consumer reports) · libphonenumber open numbering data"}
 
-lookup_provider = MockTwilioLookup()
+lookup_provider = RealLookup()
 
 # ---------- app/db ----------
 app = Flask(__name__)
+if os.environ.get("FTC_AUTOREFRESH", "1") == "1": ftc_data.ensure_fresh_async()  # lazy: only if missing or >7 days old
 app.config.update(SECRET_KEY=os.environ.get("SECRET_KEY") or os.urandom(32).hex(), DATABASE=os.path.join(os.path.dirname(__file__), "ringsleuth.db"))
 today_fn = date.today  # overridable in tests
 
@@ -118,10 +141,10 @@ input,button{padding:9px;border-radius:8px;border:0;margin:4px 0}button{backgrou
 .banner{background:#facc15;color:#000;padding:6px;text-align:center;border-radius:6px}.err{background:#7f1d1d;padding:12px;border-radius:8px}
 table{width:100%}td{padding:4px}.logo{font-size:28px;font-weight:bold;margin:14px 0}h1{font-size:26px}.grid{display:flex;flex-wrap:wrap;gap:6px}.grid a{background:#0f172a;padding:4px 8px;border-radius:6px;text-decoration:none}footer{margin:30px 0;font-size:13px;color:#94a3b8}
 #countdown{font-size:20px;font-weight:bold;text-align:center}</style></head><body>
-<div class=banner>DEMO / TEST MODE — no real charges · sample data only</div>
+<div class=banner>DEMO / TEST MODE — no real charges</div>
 <div class=logo><a href="/" style="color:inherit;text-decoration:none"><img src="/favicon.svg" alt="RingSleuth logo" width=28 height=28 style="vertical-align:middle"> RingSleuth</a></div><nav><a href="/">Home</a> · <a href="/area-code/">Area codes</a> · {% if u %}<a href="/lookup">Lookup</a> · <a href="/history">History</a> · <a href="/logout">Log out ({{u.email}})</a>{% else %}<a href="/signup">Sign up</a> · <a href="/login">Log in</a>{% endif %}</nav>
 {% if u and u.sub_start %}<p><b>{{used}} of 50 lookups used</b> this cycle · resets {{reset}}</p>{% endif %}
-{{ body|safe }}<footer>RingSleuth is a caller-ID &amp; spam check, not a people-search service. We never name private individuals and never charge to remove listings. Demo with sample data. · <a href="/area-code/">Area code directory</a><br>Not for screening tenants, employees or job applicants, and not a consumer report under the FCRA.</footer></body></html>"""
+{{ body|safe }}<footer>RingSleuth is a caller-ID &amp; spam check, not a people-search service. We never name private individuals and never charge to remove listings. · <a href="/area-code/">Area code directory</a><br>Not for screening tenants, employees or job applicants, and not a consumer report under the FCRA.</footer></body></html>"""
 
 def seo_ctx(title, desc, path=None, jsonld=(), index=True, leaflet=False):
     root = (os.environ.get("SITE_URL") or request.url_root).rstrip("/")
@@ -260,7 +283,7 @@ def lookup():
 {% if r %}<div class=card id=interstitial><p id=countdown>Your result is ready in <span id=cd-n>{{cd}}</span>…</p>
 <p style="text-align:center"><button id=show-btn type=button disabled>Show result</button></p></div>
 <div class=card id=result style="display:none"><h3>{{r.number}}</h3><table><tr><td>Caller ID</td><td>{{r.caller_name}}</td></tr><tr><td>Carrier</td><td>{{r.carrier}}</td></tr>
-<tr><td>Line type</td><td>{{r.line_type}}</td></tr><tr><td>Location</td><td>{{r.location}}</td></tr><tr><td>Spam risk</td><td>{{r.risk}} ({{r.spam_score}}/100)</td></tr></table>{% if not m %}<small class=srclabel>{{r.source}}</small>{% endif %}
+<tr><td>Line type</td><td>{{r.line_type}}</td></tr><tr><td>Location</td><td>{{r.location}}</td></tr>{% if r.timezone %}<tr><td>Time zone</td><td>{{r.timezone}}</td></tr>{% endif %}{% if r.ftc %}<tr><td>FTC complaints</td><td id=ftc>{{r.ftc}}</td></tr>{% endif %}<tr><td>Spam risk</td><td>{{r.risk}} ({{r.spam_score}}/100){% if r.ftc %} <small>based on FTC complaint count</small>{% endif %}</td></tr></table>{% if not m %}<small class=srclabel>{{r.source}}</small>{% endif %}
 {% if m and m.unknown %}<div class=mapcard><div class=maphead>🗺️ Where this number is registered</div><p class=legend id=map-unknown>Location unknown for this area code ({{m.npa}}). No map pin is shown.</p></div><small class=srclabel>{{r.source}}</small>
 {% elif m %}<div class=mapcard><div class=maphead>🗺️ Where this number is registered: approx. {{m.city}}, {{m.region}} (area code {{m.npa}})</div>
 <div class=mapwrap><div id=map></div><div class=sparkles aria-hidden=true>{% for i in range(18) %}<i style="left:{{(i*37)%100}}%;top:{{(i*53)%100}}%;animation-delay:{{(i%6)*0.5}}s"></i>{% endfor %}</div>

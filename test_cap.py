@@ -44,7 +44,8 @@ def test_blocked_lookup_not_recorded(client):
 
 def test_no_people_search_fields():
     r = A.lookup_provider.lookup("3055550199")
-    assert set(r) == {"npa","number","caller_name","carrier","line_type","location","spam_score","risk","source"}
+    assert set(r) == {"npa","number","valid","caller_name","carrier","line_type","location","timezone","ftc","ftc_count","spam_score","risk","source"}
+    assert r["caller_name"] == "Caller name not available"
 
 def test_countdown_no_ads(client):
     b = do(client).get_data(as_text=True)
@@ -135,3 +136,48 @@ def test_checkout_on_mocked(tmp_path, monkeypatch):
         assert c.post("/stripe/webhook", json=ev).status_code == 200
         assert c.post("/lookup", data={"number": "2125550100"}).status_code == 200
     assert c.get("/checkout/cancel").status_code == 200
+
+
+def _fake_csv(d):
+    return ("Company_Phone_Number,Created_Date,Violation_Date,Consumer_City,Consumer_State,Consumer_Area_Code,Subject,Recorded_Message_Or_Robocall\n"
+            "8337661884,%s 00:00:43,%s 12:42:00,Secretville,Georgia,678,Medicare & prescriptions,Y\n"
+            "8337661884,%s 01:00:00,%s 12:42:00,Hiddentown,Ohio,614,Medicare & prescriptions,N\n"
+            ",%s 01:00:00,,X,Ohio,614,Other,Y\n") % ((d.isoformat(),) * 5)
+
+@pytest.fixture
+def ftcdb(tmp_path, monkeypatch):
+    p = str(tmp_path / "ftc.db")
+    A.ftc_data.build(days=3, today=date(2026, 10, 30), fetch=lambda d: _fake_csv(d) if d == date(2026, 10, 30) else None, path=p)
+    monkeypatch.setattr(A.ftc_data, "DB_PATH", p)
+    return p
+
+def test_ftc_build_minimal_columns(ftcdb):
+    import sqlite3
+    c = sqlite3.connect(ftcdb)
+    assert [x[1] for x in c.execute("PRAGMA table_info(ftc)")] == ["number", "n", "last", "robo", "topic"]
+    assert c.execute("SELECT * FROM ftc").fetchall() == [("8337661884", 2, "2026-10-30", 1, "Medicare & prescriptions")]
+
+def test_ftc_result_shown_no_complainant_info(client, ftcdb):
+    b = do(client, "8337661884").get_data(as_text=True)
+    assert "Reported to the FTC 2 times, last on Oct 30, 2026, robocall yes, topic: Medicare &amp; prescriptions" in b
+    for bad in ("Secretville", "Hiddentown", "Georgia", "SAMPLE DATA"): assert bad not in b
+    r = A.lookup_provider.lookup("8337661884"); assert r["spam_score"] == A.spam_score(2) and r["ftc_count"] == 2
+
+def test_no_ftc_complaints(client, ftcdb):
+    b = do(client, "2125550100").get_data(as_text=True)
+    assert "No FTC complaints on file" in b and "Caller name not available" in b
+    r = A.lookup_provider.lookup("2125550100"); assert r["spam_score"] == 0 and r["risk"] == "Low"
+
+def test_spam_score_counts_only():
+    assert [A.spam_score(n) for n in (0, 1, 3, 7, 100)] == [0, 25, 50, 75, 99]
+
+def test_real_phonenumber_fields(ftcdb):
+    r = A.lookup_provider.lookup("8145550123")
+    assert "Johnstown" in r["location"] or "PA" in r["location"] or "Pennsylvania" in r["location"]
+    assert r["timezone"] == "Eastern Time (ET)"
+    t = A.lookup_provider.lookup("8005551234"); assert t["line_type"] == "Toll-free"
+    bad = A.lookup_provider.lookup("1235550100"); assert bad["valid"] is False
+
+def test_ftc_stale_logic(ftcdb):
+    assert not A.ftc_data.stale(ftcdb)
+    assert A.ftc_data.stale(ftcdb + ".missing")

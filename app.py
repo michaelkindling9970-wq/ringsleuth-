@@ -191,14 +191,15 @@ def lookup():
 {% if r %}<div class=card id=interstitial><p id=countdown>Your result is ready in <span id=cd-n>{{cd}}</span>…</p>
 <p style="text-align:center"><button id=show-btn type=button disabled>Show result</button></p></div>
 <div class=card id=result style="display:none"><h3>{{r.number}}</h3><table><tr><td>Caller ID</td><td>{{r.caller_name}}</td></tr><tr><td>Carrier</td><td>{{r.carrier}}</td></tr>
-<tr><td>Line type</td><td>{{r.line_type}}</td></tr><tr><td>Location</td><td>{{r.location}}</td></tr><tr><td>Spam risk</td><td>{{r.risk}} ({{r.spam_score}}/100)</td></tr></table><small>{{r.source}}</small>
-{% if m and m.unknown %}<div class=mapcard><div class=maphead>🗺️ Where this number is registered</div><p class=legend id=map-unknown>Location unknown for this area code ({{m.npa}}). No map pin is shown.</p></div>
+<tr><td>Line type</td><td>{{r.line_type}}</td></tr><tr><td>Location</td><td>{{r.location}}</td></tr><tr><td>Spam risk</td><td>{{r.risk}} ({{r.spam_score}}/100)</td></tr></table>{% if not m %}<small class=srclabel>{{r.source}}</small>{% endif %}
+{% if m and m.unknown %}<div class=mapcard><div class=maphead>🗺️ Where this number is registered</div><p class=legend id=map-unknown>Location unknown for this area code ({{m.npa}}). No map pin is shown.</p></div><small class=srclabel>{{r.source}}</small>
 {% elif m %}<div class=mapcard><div class=maphead>🗺️ Where this number is registered: approx. {{m.city}}, {{m.region}} (area code {{m.npa}})</div>
 <div class=mapwrap><div id=map></div><div class=sparkles aria-hidden=true>{% for i in range(18) %}<i style="left:{{(i*37)%100}}%;top:{{(i*53)%100}}%;animation-delay:{{(i%6)*0.5}}s"></i>{% endfor %}</div>
 <div class=maplabel>Approximate area (from number registration, not live location)</div>
 <div class=maplabel2>Illustrative routing - not actual carrier trunk data</div></div>
-<div class=legend><span><b class="lg pin"></b>Destination: approximate area (~25 km around {{m.city}})</span><span><b class="lg line"></b>Illustrative call path</span><span><b class="lg dest"></b>Start hub (illustrative)</span><span><b class="lg node"></b>Carrier hub / IXP (illustrative)</span></div></div>
+<div class=legend><span><b class="lg pin"></b>Destination: approximate area (~25 km around {{m.city}})</span><span><b class="lg line"></b>Illustrative call path</span><span><b class="lg dest"></b>Start hub (illustrative)</span><span><b class="lg node"></b>Carrier hub / IXP (illustrative)</span></div></div><small class=srclabel>{{r.source}}</small>
 <style>
+.srclabel{display:block;margin-top:6px;font-size:11px;color:#94a3b8;text-align:center;letter-spacing:.04em}
 .mapcard{margin-top:14px;padding:2px;border-radius:16px;background:linear-gradient(135deg,#38bdf8,#a78bfa,#f472b6);box-shadow:0 10px 40px rgba(56,189,248,.25)}
 .maphead{padding:8px 12px;font-weight:bold;color:#fff}
 .mapwrap{position:relative;border-radius:14px;overflow:hidden;isolation:isolate}

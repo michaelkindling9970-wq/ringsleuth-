@@ -38,15 +38,18 @@ def _ip_api(ip):
     if d.get("status") == "success" and d.get("countryCode") == "US" and d.get("region") in US_STATES: return d["region"]
     return None
 
-def region_for_ip(ip, resolver=_ip_api):
+def region_for_ip(ip, resolver=None):
     """2-letter US state code or None. Cached in memory under a salted hash (never the raw IP)."""
     if not ip: return None
     key = hashlib.sha256(_SALT + ip.encode()).hexdigest()[:20]; now = time.time()
     with _lock:
         hit = _ip_cache.get(key)
-        if hit and now - hit[1] < _IP_TTL: _ip_cache.move_to_end(key); return hit[0]
-    try: reg = resolver(ip)
-    except Exception as e: log.info("geolocation failed: %s", type(e).__name__); reg = None
+        if hit and now - hit[1] < _IP_TTL:
+            _ip_cache.move_to_end(key); log.info("location lookup: state=%s cache=hit", hit[0] or "unknown/non-US"); return hit[0]
+    failed = False
+    try: reg = (resolver or _ip_api)(ip)
+    except Exception as e: failed = True; reg = None; log.info("location lookup: geolocation error %s", type(e).__name__)
+    log.info("location lookup: state=%s cache=miss", reg or ("failed" if failed else "unknown/non-US"))
     with _lock:
         _ip_cache[key] = (reg, now)
         while len(_ip_cache) > _IP_CACHE_MAX: _ip_cache.popitem(last=False)

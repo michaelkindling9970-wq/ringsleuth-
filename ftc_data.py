@@ -73,7 +73,7 @@ def build(days=WINDOW_DAYS, today=None, fetch=_fetch, path=None):
     c.execute("PRAGMA temp_store=FILE"); c.execute("PRAGMA cache_size=-2000"); c.execute("PRAGMA journal_mode=OFF")
     # stream rows into a temp staging table so memory stays small on Render's free tier
     c.execute("CREATE TEMP TABLE raw(number TEXT, d TEXT, robo INTEGER, subject TEXT)")
-    files = []
+    files = []; raw_rows = 0
     for i in range(days + 1):
         d = today - timedelta(days=i)
         if d.weekday() >= 5: continue
@@ -89,6 +89,7 @@ def build(days=WINDOW_DAYS, today=None, fetch=_fetch, path=None):
             s = (row.get("Subject") or "").strip()
             batch.append((num, (row.get("Created_Date") or "")[:10], 1 if (row.get("Recorded_Message_Or_Robocall") or "").strip().upper() == "Y" else 0,
                           None if not s or s == "No Subject Provided" else s))
+            raw_rows += 1
             if len(batch) >= BATCH: c.executemany("INSERT INTO raw VALUES(?,?,?,?)", batch); batch = []
         if batch: c.executemany("INSERT INTO raw VALUES(?,?,?,?)", batch)
         c.commit(); del batch, it, src
@@ -104,12 +105,20 @@ def build(days=WINDOW_DAYS, today=None, fetch=_fetch, path=None):
     c.executemany("INSERT INTO meta VALUES(?,?)", [("built", datetime.now().isoformat(timespec="seconds")), ("newest_file", max(files)), ("oldest_file", min(files)), ("files", str(len(files)))])
     c.commit(); c.execute("VACUUM"); c.close()
     os.replace(tmp, path)
-    log.info("FTC data built: %d numbers from %d files (%s..%s)", n, len(files), min(files), max(files))
+    log.info("FTC data built: %d complaint rows from %d daily files (%s..%s) -> %d numbers total", raw_rows, len(files), min(files), max(files), n)
     return n
 
 def stale(path=None):
     b = info(path).get("built")
     return not b or datetime.now() - datetime.fromisoformat(b) > timedelta(days=MAX_AGE_DAYS)
+
+def _stamp():
+    from datetime import timezone
+    u = datetime.now(timezone.utc)
+    try:
+        from zoneinfo import ZoneInfo; e = u.astimezone(ZoneInfo("America/New_York")).strftime("%Y-%m-%d %H:%M:%S %Z")
+    except Exception: e = "?"
+    return u.strftime("%Y-%m-%d %H:%M:%S UTC") + " / " + e
 
 STALE_LOCK_SECS = 1800
 
@@ -138,13 +147,16 @@ def ensure_fresh_async(path=None):
     """Lazy refresh: build in a background thread if missing or older than 7 days."""
     if not stale(path): return False
     def run():
-        if not _lock.acquire(blocking=False): return
+        if not _lock.acquire(blocking=False): log.info("FTC refresh skipped: already running in this process"); return
         lockf = (path or DB_PATH) + ".building"
-        got = False
+        got = False; t0 = time.time()
         try:
             got = acquire_file_lock(lockf)
-            if got: build(path=path)
-        except Exception as e: log.warning("FTC refresh failed: %s", e)
+            if not got: log.info("FTC refresh skipped: another process holds the build lock"); return
+            log.info("FTC refresh started at %s", _stamp())
+            n = build(path=path)
+            log.info("FTC refresh finished at %s in %.0fs: %d numbers total", _stamp(), time.time() - t0, n)
+        except Exception as e: log.warning("FTC refresh FAILED at %s after %.0fs: %s", _stamp(), time.time() - t0, e)
         finally:
             if got:
                 try: os.remove(lockf)

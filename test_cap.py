@@ -271,3 +271,18 @@ def test_stale_lock_taken_over(tmp_path):
     open(lf, "w").write("999999"); os.utime(lf, (time.time() - 4000,) * 2)
     assert A.ftc_data.acquire_file_lock(lf)
     assert not A.ftc_data.acquire_file_lock(lf)  # held by live pid (us)
+
+def test_logs_never_contain_ip(client, geodb, monkeypatch, caplog):
+    import logging, hashlib
+    A._rl.propagate = True
+    try:
+        caplog.set_level(logging.INFO, logger="ringsleuth")
+        monkeypatch.setattr(A.geoloc, "_ip_api", lambda ip: "CO")
+        ip = "8.8.4.4"
+        for _ in range(2): client.post("/lookup", data={"number": "7209534126"}, headers={"X-Forwarded-For": ip})
+        A.geoloc.region_for_ip("9.9.9.9", resolver=lambda ip: (_ for _ in ()).throw(TimeoutError()))
+        text = caplog.text
+        assert "location lookup: state=CO cache=miss" in text and "state=CO cache=hit" in text and "state=failed" in text
+        assert ip not in text and "9.9.9.9" not in text
+        for k in A.geoloc._ip_cache: assert k not in text
+    finally: A._rl.propagate = False

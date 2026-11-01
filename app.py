@@ -53,6 +53,11 @@ def cycle_bounds(sub_start, today):
     return start, add_months(sub_start, n + 1, sub_start.day)
 
 # ---------- real lookup: phonenumbers (offline) + FTC Do Not Call complaints ----------
+import logging, sys
+_h = logging.StreamHandler(sys.stdout)  # StreamHandler flushes after every record -> shows up in Render logs immediately
+_h.setFormatter(logging.Formatter("[ringsleuth] %(levelname)s %(name)s: %(message)s"))
+_rl = logging.getLogger("ringsleuth")
+if not _rl.handlers: _rl.addHandler(_h); _rl.setLevel(logging.INFO); _rl.propagate = False
 import ftc_data
 import phonenumbers
 from phonenumbers import carrier as pn_carrier, timezone as pn_timezone

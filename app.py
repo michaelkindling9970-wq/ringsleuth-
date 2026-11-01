@@ -22,7 +22,7 @@ def map_data(location):
     o = AREA_COORDS[city]
     d = lambda p: math.hypot(p[0] - o[0], (p[1] - o[1]) * math.cos(math.radians(o[0])))
     near = [h for h in sorted(HUBS, key=lambda h: d(HUBS[h])) if HUBS[h] != o][:2]
-    dest = "Ashburn, VA" if "Ashburn, VA" not in near else "Chicago, IL"
+    dest = next(h for h in ("Ashburn, VA", "Chicago, IL", "Dallas, TX") if h not in near and HUBS[h] != o)
     nodes = [{"name": n, "lat": HUBS[n][0], "lon": HUBS[n][1]} for n in near + [dest]]
     return {"city": city, "lat": o[0], "lon": o[1], "radius_m": 25000, "nodes": nodes}
 
@@ -95,13 +95,12 @@ def usage(u):
                         (u["id"], start.isoformat(), reset.isoformat())).fetchone()[0]
     return used, reset
 
-BASE = """<!doctype html><html><head><title>RingSleuth</title><style>
+BASE = """<!doctype html><html><head><meta charset=utf-8><meta name=viewport content="width=device-width,initial-scale=1"><title>RingSleuth</title><style>
 body{font-family:system-ui;max-width:760px;margin:auto;padding:20px;background:#0f172a;color:#e2e8f0}
 a{color:#38bdf8}.card{background:#1e293b;padding:18px;border-radius:12px;margin:14px 0}
 input,button{padding:9px;border-radius:8px;border:0;margin:4px 0}button{background:#38bdf8;font-weight:bold;cursor:pointer}
 .banner{background:#facc15;color:#000;padding:6px;text-align:center;border-radius:6px}.err{background:#7f1d1d;padding:12px;border-radius:8px}
 table{width:100%}td{padding:4px}
-#map{height:300px;width:100%;border-radius:10px;margin-top:10px}.maplegend{font-size:12px;color:#94a3b8}
 #countdown{font-size:20px;font-weight:bold;text-align:center}</style></head><body>
 <div class=banner>DEMO / TEST MODE — no real charges · sample data only</div>
 <h1>📞 RingSleuth</h1><nav><a href="/">Home</a> · {% if u %}<a href="/lookup">Lookup</a> · <a href="/history">History</a> · <a href="/logout">Log out ({{u.email}})</a>{% else %}<a href="/signup">Sign up</a> · <a href="/login">Log in</a>{% endif %}</nav>
@@ -184,17 +183,53 @@ def lookup():
 <p style="text-align:center"><button id=show-btn type=button disabled>Show result</button></p></div>
 <div class=card id=result style="display:none"><h3>{{r.number}}</h3><table><tr><td>Caller ID</td><td>{{r.caller_name}}</td></tr><tr><td>Carrier</td><td>{{r.carrier}}</td></tr>
 <tr><td>Line type</td><td>{{r.line_type}}</td></tr><tr><td>Location</td><td>{{r.location}}</td></tr><tr><td>Spam risk</td><td>{{r.risk}} ({{r.spam_score}}/100)</td></tr></table><small>{{r.source}}</small>
-{% if m %}<h4>Map</h4><p class=maplegend>📍 <b>Approximate area (from number registration, not live location)</b> — ~25 km circle around {{m.city}}<br>
-<span style="color:#f472b6">- - -</span> <b>Illustrative routing - not actual carrier trunk data</b></p><div id=map></div>
+{% if m %}<div class=mapcard><div class=maphead>🗺️ Where this number is registered</div>
+<div class=mapwrap><div id=map></div><div class=sparkles aria-hidden=true>{% for i in range(18) %}<i style="left:{{(i*37)%100}}%;top:{{(i*53)%100}}%;animation-delay:{{(i%6)*0.5}}s"></i>{% endfor %}</div>
+<div class=maplabel>Approximate area (from number registration, not live location)</div>
+<div class=maplabel2>Illustrative routing - not actual carrier trunk data</div></div>
+<div class=legend><span><b class="lg pin"></b>Approximate area (~25 km around {{m.city}})</span><span><b class="lg line"></b>Illustrative call path</span><span><b class="lg node"></b>Carrier hub / IXP (illustrative)</span><span><b class="lg dest"></b>Destination node</span></div></div>
 <link rel=stylesheet href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" crossorigin="">
-<style>@keyframes dash{to{stroke-dashoffset:-40}}.callpath{animation:dash 1.2s linear infinite}</style>
+<style>
+.mapcard{margin-top:14px;padding:2px;border-radius:16px;background:linear-gradient(135deg,#38bdf8,#a78bfa,#f472b6);box-shadow:0 10px 40px rgba(56,189,248,.25)}
+.maphead{padding:8px 12px;font-weight:bold;color:#fff}
+.mapwrap{position:relative;border-radius:14px;overflow:hidden}
+#map{height:300px;width:100%;background:#0b1020}
+.maplabel,.maplabel2{position:absolute;left:8px;z-index:500;background:rgba(15,23,42,.85);color:#e2e8f0;font-size:11px;padding:3px 7px;border-radius:6px;border:1px solid #334155;pointer-events:none;max-width:85%}
+.darktiles{filter:invert(1) hue-rotate(200deg) brightness(.75) contrast(1.1) saturate(.6)}
+.maplabel{top:8px;left:auto;right:8px}.maplabel2{bottom:22px;color:#f9a8d4}
+.legend{display:flex;flex-wrap:wrap;gap:6px 14px;background:#0f172a;border-radius:0 0 14px 14px;padding:8px 12px;font-size:12px;color:#cbd5e1}
+.lg{display:inline-block;width:12px;height:12px;border-radius:50%;margin-right:5px;vertical-align:middle}
+.lg.pin{background:#38bdf8;box-shadow:0 0 8px #38bdf8}.lg.line{width:20px;height:3px;border-radius:2px;background:linear-gradient(90deg,#38bdf8,#f472b6)}
+.lg.node{background:#a78bfa;box-shadow:0 0 8px #a78bfa}.lg.dest{background:#f472b6;box-shadow:0 0 8px #f472b6}
+.sparkles{position:absolute;inset:0;z-index:450;pointer-events:none}
+.sparkles i{position:absolute;width:3px;height:3px;border-radius:50%;background:#fff;box-shadow:0 0 6px #fff;opacity:0;animation:twinkle 3s ease-in-out infinite}
+@keyframes twinkle{0%,100%{opacity:0;transform:scale(.5)}50%{opacity:.8;transform:scale(1.3)}}
+.rs-pin{width:18px;height:18px;border-radius:50%;background:#38bdf8;box-shadow:0 0 12px 4px #38bdf8;position:relative}
+.rs-pin:after{content:"";position:absolute;inset:-6px;border-radius:50%;border:2px solid #38bdf8;animation:pulse 1.8s ease-out infinite}
+@keyframes pulse{from{transform:scale(.6);opacity:1}to{transform:scale(2.4);opacity:0}}
+.rs-node{width:12px;height:12px;border-radius:50%;background:#a78bfa;box-shadow:0 0 10px 3px #a78bfa;animation:pop .5s cubic-bezier(.3,1.6,.5,1) both}
+.rs-node.dest{background:#f472b6;box-shadow:0 0 12px 4px #f472b6}
+@keyframes pop{from{transform:scale(0);opacity:0}to{transform:scale(1);opacity:1}}
+.callglow{filter:drop-shadow(0 0 6px #f472b6)}
+.callpath{stroke-dasharray:10 14;animation:dash 1.2s linear infinite}
+@keyframes dash{to{stroke-dashoffset:-48}}
+.leaflet-tooltip{background:#0f172a;color:#e2e8f0;border:1px solid #475569}
+@media (prefers-reduced-motion:reduce){.sparkles,.rs-pin:after{display:none}.callpath,.rs-node{animation:none}}
+</style>
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" crossorigin=""></script>
 <script>window.RS_MAP={{ m|tojson }};window.drawMap=function(){var m=RS_MAP;if(window._mapDone||!window.L)return;window._mapDone=1;
-var map=L.map('map',{scrollWheelZoom:false});L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',{maxZoom:12,attribution:'&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'}).addTo(map);
-var o=[m.lat,m.lon];L.circle(o,{radius:m.radius_m,color:'#38bdf8',fillOpacity:.25}).addTo(map).bindTooltip('Approximate area (from number registration, not live location)',{permanent:true,direction:'top'});
-var pts=[o];m.nodes.forEach(function(n,i){var p=[n.lat,n.lon];pts.push(p);L.circleMarker(p,{radius:6,color:'#f472b6',fillOpacity:1}).addTo(map).bindTooltip((i==m.nodes.length-1?'Destination node: ':'Hub: ')+n.name+' (illustrative)');});
-L.polyline(pts,{color:'#f472b6',weight:3,dashArray:'8 12',className:'callpath'}).addTo(map).bindTooltip('Illustrative call path - not actual carrier trunk data',{sticky:true});
-map.fitBounds(L.latLngBounds(pts).pad(.2));};</script>{% endif %}</div>
+var rm=window.matchMedia&&matchMedia('(prefers-reduced-motion: reduce)').matches;
+var map=L.map('map',{scrollWheelZoom:false,zoomControl:true});
+L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png',{maxZoom:12,className:'darktiles',attribution:'&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'}).addTo(map);
+var o=[m.lat,m.lon];L.circle(o,{radius:m.radius_m,color:'#38bdf8',weight:1,fillColor:'#38bdf8',fillOpacity:.18}).addTo(map);
+L.marker(o,{icon:L.divIcon({className:'',html:'<div class=rs-pin></div>',iconSize:[18,18]})}).addTo(map).bindTooltip('Approximate area (from number registration, not live location)');
+var pts=[o].concat(m.nodes.map(function(n){return[n.lat,n.lon]}));
+L.polyline(pts,{color:'#a78bfa',weight:7,opacity:.25,className:'callglow'}).addTo(map);
+L.polyline(pts,{color:'#f472b6',weight:3,className:'callpath callglow'}).addTo(map).bindTooltip('Illustrative call path - not actual carrier trunk data',{sticky:true});
+m.nodes.forEach(function(n,i){var last=i==m.nodes.length-1;setTimeout(function(){
+L.marker([n.lat,n.lon],{icon:L.divIcon({className:'',html:'<div class="rs-node'+(last?' dest':'')+'"></div>',iconSize:[12,12]})}).addTo(map)
+.bindTooltip((last?'Destination node: ':'Hub: ')+n.name+' (illustrative)');},rm?0:400+i*500);});
+map.fitBounds(L.latLngBounds(pts).pad(.25));};</script>{% endif %}</div>
 <noscript><style>#result{display:block!important}#countdown,#show-btn{display:none}</style></noscript>
 <script>(function(){var n={{cd}},el=document.getElementById('cd-n'),b=document.getElementById('show-btn'),p=document.getElementById('countdown');
 function reveal(){document.getElementById('result').style.display='block';if(window.drawMap)setTimeout(drawMap,50);b.style.display='none';p.textContent='Your result is ready.';}

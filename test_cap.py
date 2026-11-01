@@ -44,7 +44,7 @@ def test_blocked_lookup_not_recorded(client):
 
 def test_no_people_search_fields():
     r = A.lookup_provider.lookup("3055550199")
-    assert set(r) == {"number","caller_name","carrier","line_type","location","spam_score","risk","source"}
+    assert set(r) == {"npa","number","caller_name","carrier","line_type","location","spam_score","risk","source"}
 
 def test_countdown_no_ads(client):
     b = do(client).get_data(as_text=True)
@@ -59,7 +59,17 @@ def test_map_markup(client):
     assert "google" not in b.lower()
 
 def test_map_data_approximate():
-    for city in A.AREA_COORDS:
-        m = A.map_data(city + " (area code region)")
-        assert m["radius_m"] == 25000 and len(m["nodes"]) == 3 and m["nodes"][-1]["name"] in ("Ashburn, VA", "Chicago, IL", "Dallas, TX")
-        assert len({n["name"] for n in m["nodes"]}) == 3
+    for npa, city in (("212","New York"),("215","Philadelphia"),("412","Pittsburgh"),("310","Los Angeles"),("312","Chicago"),("814","Johnstown")):
+        m = A.map_data(npa)
+        assert city in m["city"] and m["radius_m"] == 25000 and 1 <= len(m["nodes"]) - 1 <= 2
+        assert len({n["name"] for n in m["nodes"]}) == len(m["nodes"])
+    assert abs(A.map_data("814")["lat"] - 40.33) < 0.05 and abs(A.map_data("814")["lon"] + 78.92) < 0.05
+    assert len(A.AREA_CODES) > 300
+
+def test_unknown_area_code(client):
+    b = do(client, "9995550100").get_data(as_text=True)
+    assert "Location unknown for this area code" in b and "id=map>" not in b
+
+def test_814_lookup(client):
+    b = do(client, "8145550123").get_data(as_text=True)
+    assert "Johnstown" in b and "area code 814" in b

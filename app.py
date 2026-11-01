@@ -8,23 +8,32 @@ LOOKUP_CAP = 50
 PRICE = "4.99"
 COUNTDOWN_SECONDS = 15
 
-# Approximate city centroids for sample data (area-code region, never a person's location)
-AREA_COORDS = {"New York, NY": (40.7128, -74.0060), "Miami, FL": (25.7617, -80.1918), "Austin, TX": (30.2672, -97.7431),
-               "Denver, CO": (39.7392, -104.9903), "Seattle, WA": (47.6062, -122.3321), "Columbus, OH": (39.9612, -82.9988)}
+# Approximate main-city centroid per NANP area code (registration region, never a person's location).
+# Built from ravisorg/Area-Code-Geolocation-Database (NANPA city lists) + GeoNames populations; see area_codes.json.
+import json as _json
+AREA_CODES = _json.load(open(os.path.join(os.path.dirname(__file__), "area_codes.json")))
 HUBS = {"Ashburn, VA": (39.0438, -77.4874), "Chicago, IL": (41.8781, -87.6298), "Dallas, TX": (32.7767, -96.7970),
         "Los Angeles, CA": (34.0522, -118.2437), "New York, NY": (40.7128, -74.0060), "Atlanta, GA": (33.7490, -84.3880),
         "Denver, CO": (39.7392, -104.9903), "Seattle, WA": (47.6062, -122.3321)}
 
-def map_data(location):
+def area_info(npa):
+    r = AREA_CODES.get(npa)
+    return None if not r else {"npa": npa, "city": r[0], "region": r[1], "country": r[2], "lat": r[3], "lon": r[4]}
+
+def map_data(npa):
+    """Illustrative route: start at a carrier hub, pass 1-2 hubs, END at the area-code city."""
     import math
-    city = location.split(" (")[0]
-    if city not in AREA_COORDS: return None
-    o = AREA_COORDS[city]
-    d = lambda p: math.hypot(p[0] - o[0], (p[1] - o[1]) * math.cos(math.radians(o[0])))
-    near = [h for h in sorted(HUBS, key=lambda h: d(HUBS[h])) if HUBS[h] != o][:2]
-    dest = next(h for h in ("Ashburn, VA", "Chicago, IL", "Dallas, TX") if h not in near and HUBS[h] != o)
-    nodes = [{"name": n, "lat": HUBS[n][0], "lon": HUBS[n][1]} for n in near + [dest]]
-    return {"city": city, "lat": o[0], "lon": o[1], "radius_m": 25000, "nodes": nodes}
+    a = area_info(npa)
+    if not a: return {"unknown": True, "npa": npa}
+    o = (a["lat"], a["lon"])
+    d = lambda p, q=o: math.hypot(p[0] - q[0], (p[1] - q[1]) * math.cos(math.radians(q[0])))
+    hubs = [h for h in HUBS if d(HUBS[h]) > 0.5]  # skip a hub sitting on the destination
+    near = sorted(hubs, key=lambda h: d(HUBS[h]))
+    mid = near[:2] if d(HUBS[near[1]]) < 12 else near[:1]
+    start = min((h for h in hubs if h not in mid), key=lambda h: abs(d(HUBS[h]) - 15))  # a hub at moderate distance, for a visible path
+    route = [start] + sorted(mid, key=lambda h: -d(HUBS[h]))
+    nodes = [{"name": n, "lat": HUBS[n][0], "lon": HUBS[n][1]} for n in route]
+    return {"city": a["city"], "region": a["region"], "npa": npa, "lat": o[0], "lon": o[1], "radius_m": 25000, "nodes": nodes}
 
 
 # ---------- billing cycle logic ----------
@@ -48,7 +57,6 @@ class MockTwilioLookup:
     NAMES = ["WIRELESS CALLER", "ACME PLUMBING LLC", "PRIVATE CALLER", "CITY CLINIC", "UNKNOWN", "TELEMARKETING SVC"]
     CARRIERS = ["Verizon Wireless", "T-Mobile USA", "AT&T Mobility", "Bandwidth.com (VoIP)", "Comcast Phone", "Google Voice"]
     TYPES = ["mobile", "landline", "voip"]
-    PLACES = ["New York, NY", "Miami, FL", "Austin, TX", "Denver, CO", "Seattle, WA", "Columbus, OH"]
 
     def lookup(self, number):
         digits = "".join(c for c in number if c.isdigit())
@@ -61,7 +69,8 @@ class MockTwilioLookup:
         return {"number": f"+{digits[0]} ({digits[1:4]}) {digits[4:7]}-{digits[7:]}",
                 "caller_name": self.NAMES[(h >> 16) % 6], "carrier": self.CARRIERS[(h >> 24) % 6],
                 "line_type": {"mobile": "Cell", "landline": "Landline", "voip": "VoIP"}[lt],
-                "location": self.PLACES[(h >> 32) % 6] + " (area code region)",
+                "location": (lambda a: f"{a['city']}, {a['region']} (area code {digits[1:4]} region)" if a else f"Unknown (area code {digits[1:4]})")(area_info(digits[1:4])),
+                "npa": digits[1:4],
                 "spam_score": score,
                 "risk": "High" if score >= 70 else "Medium" if score >= 40 else "Low",
                 "source": "SAMPLE DATA (mock)"}
@@ -95,7 +104,7 @@ def usage(u):
                         (u["id"], start.isoformat(), reset.isoformat())).fetchone()[0]
     return used, reset
 
-BASE = """<!doctype html><html><head><meta charset=utf-8><meta name=viewport content="width=device-width,initial-scale=1"><title>RingSleuth</title><style>
+BASE = """<!doctype html><html><head><meta charset=utf-8><meta name=viewport content="width=device-width,initial-scale=1"><link rel=stylesheet href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"><script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script><title>RingSleuth</title><style>
 body{font-family:system-ui;max-width:760px;margin:auto;padding:20px;background:#0f172a;color:#e2e8f0}
 a{color:#38bdf8}.card{background:#1e293b;padding:18px;border-radius:12px;margin:14px 0}
 input,button{padding:9px;border-radius:8px;border:0;margin:4px 0}button{background:#38bdf8;font-weight:bold;cursor:pointer}
@@ -183,20 +192,20 @@ def lookup():
 <p style="text-align:center"><button id=show-btn type=button disabled>Show result</button></p></div>
 <div class=card id=result style="display:none"><h3>{{r.number}}</h3><table><tr><td>Caller ID</td><td>{{r.caller_name}}</td></tr><tr><td>Carrier</td><td>{{r.carrier}}</td></tr>
 <tr><td>Line type</td><td>{{r.line_type}}</td></tr><tr><td>Location</td><td>{{r.location}}</td></tr><tr><td>Spam risk</td><td>{{r.risk}} ({{r.spam_score}}/100)</td></tr></table><small>{{r.source}}</small>
-{% if m %}<div class=mapcard><div class=maphead>🗺️ Where this number is registered</div>
+{% if m and m.unknown %}<div class=mapcard><div class=maphead>🗺️ Where this number is registered</div><p class=legend id=map-unknown>Location unknown for this area code ({{m.npa}}). No map pin is shown.</p></div>
+{% elif m %}<div class=mapcard><div class=maphead>🗺️ Where this number is registered: approx. {{m.city}}, {{m.region}} (area code {{m.npa}})</div>
 <div class=mapwrap><div id=map></div><div class=sparkles aria-hidden=true>{% for i in range(18) %}<i style="left:{{(i*37)%100}}%;top:{{(i*53)%100}}%;animation-delay:{{(i%6)*0.5}}s"></i>{% endfor %}</div>
 <div class=maplabel>Approximate area (from number registration, not live location)</div>
 <div class=maplabel2>Illustrative routing - not actual carrier trunk data</div></div>
-<div class=legend><span><b class="lg pin"></b>Approximate area (~25 km around {{m.city}})</span><span><b class="lg line"></b>Illustrative call path</span><span><b class="lg node"></b>Carrier hub / IXP (illustrative)</span><span><b class="lg dest"></b>Destination node</span></div></div>
-<link rel=stylesheet href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" crossorigin="">
+<div class=legend><span><b class="lg pin"></b>Destination: approximate area (~25 km around {{m.city}})</span><span><b class="lg line"></b>Illustrative call path</span><span><b class="lg dest"></b>Start hub (illustrative)</span><span><b class="lg node"></b>Carrier hub / IXP (illustrative)</span></div></div>
 <style>
 .mapcard{margin-top:14px;padding:2px;border-radius:16px;background:linear-gradient(135deg,#38bdf8,#a78bfa,#f472b6);box-shadow:0 10px 40px rgba(56,189,248,.25)}
 .maphead{padding:8px 12px;font-weight:bold;color:#fff}
-.mapwrap{position:relative;border-radius:14px;overflow:hidden}
+.mapwrap{position:relative;border-radius:14px;overflow:hidden;isolation:isolate}
 #map{height:300px;width:100%;background:#0b1020}
 .maplabel,.maplabel2{position:absolute;left:8px;z-index:500;background:rgba(15,23,42,.85);color:#e2e8f0;font-size:11px;padding:3px 7px;border-radius:6px;border:1px solid #334155;pointer-events:none;max-width:85%}
 .darktiles{filter:invert(1) hue-rotate(200deg) brightness(.75) contrast(1.1) saturate(.6)}
-.maplabel{top:8px;left:auto;right:8px}.maplabel2{bottom:22px;color:#f9a8d4}
+.maplabel{top:8px;left:52px;right:8px;max-width:none;text-align:right}.maplabel2{bottom:22px;color:#f9a8d4}
 .legend{display:flex;flex-wrap:wrap;gap:6px 14px;background:#0f172a;border-radius:0 0 14px 14px;padding:8px 12px;font-size:12px;color:#cbd5e1}
 .lg{display:inline-block;width:12px;height:12px;border-radius:50%;margin-right:5px;vertical-align:middle}
 .lg.pin{background:#38bdf8;box-shadow:0 0 8px #38bdf8}.lg.line{width:20px;height:3px;border-radius:2px;background:linear-gradient(90deg,#38bdf8,#f472b6)}
@@ -216,24 +225,25 @@ def lookup():
 .leaflet-tooltip{background:#0f172a;color:#e2e8f0;border:1px solid #475569}
 @media (prefers-reduced-motion:reduce){.sparkles,.rs-pin:after{display:none}.callpath,.rs-node{animation:none}}
 </style>
-<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" crossorigin=""></script>
-<script>window.RS_MAP={{ m|tojson }};window.drawMap=function(){var m=RS_MAP;if(window._mapDone||!window.L)return;window._mapDone=1;
+<script>window.RS_MAP={{ m|tojson }};window.drawMap=function(){var m=RS_MAP;if(window._mapDone||!window.L||!document.getElementById('map'))return;window._mapDone=1;
 var rm=window.matchMedia&&matchMedia('(prefers-reduced-motion: reduce)').matches;
-var map=L.map('map',{scrollWheelZoom:false,zoomControl:true});
+var map=L.map('map',{scrollWheelZoom:false,zoomControl:true,attributionControl:true});
 L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png',{maxZoom:12,className:'darktiles',attribution:'&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'}).addTo(map);
-var o=[m.lat,m.lon];L.circle(o,{radius:m.radius_m,color:'#38bdf8',weight:1,fillColor:'#38bdf8',fillOpacity:.18}).addTo(map);
-L.marker(o,{icon:L.divIcon({className:'',html:'<div class=rs-pin></div>',iconSize:[18,18]})}).addTo(map).bindTooltip('Approximate area (from number registration, not live location)');
-var pts=[o].concat(m.nodes.map(function(n){return[n.lat,n.lon]}));
+var dest=[m.lat,m.lon];var pts=m.nodes.map(function(n){return[n.lat,n.lon]}).concat([dest]);
+function frame(){map.invalidateSize();map.fitBounds(L.latLngBounds(pts.concat([dest])),{padding:innerWidth<500?[18,18]:[40,40],maxZoom:7});}
+frame();setTimeout(frame,250);window.addEventListener('resize',frame);
 L.polyline(pts,{color:'#a78bfa',weight:7,opacity:.25,className:'callglow'}).addTo(map);
 L.polyline(pts,{color:'#f472b6',weight:3,className:'callpath callglow'}).addTo(map).bindTooltip('Illustrative call path - not actual carrier trunk data',{sticky:true});
-m.nodes.forEach(function(n,i){var last=i==m.nodes.length-1;setTimeout(function(){
-L.marker([n.lat,n.lon],{icon:L.divIcon({className:'',html:'<div class="rs-node'+(last?' dest':'')+'"></div>',iconSize:[12,12]})}).addTo(map)
-.bindTooltip((last?'Destination node: ':'Hub: ')+n.name+' (illustrative)');},rm?0:400+i*500);});
-map.fitBounds(L.latLngBounds(pts).pad(.25));};</script>{% endif %}</div>
+m.nodes.forEach(function(n,i){setTimeout(function(){
+L.marker([n.lat,n.lon],{icon:L.divIcon({className:'',html:'<div class="rs-node'+(i==0?' dest':'')+'"></div>',iconSize:[12,12],iconAnchor:[6,6]})}).addTo(map)
+.bindTooltip((i==0?'Start hub: ':'Hub: ')+n.name+' (illustrative)');},rm?0:300+i*500);});
+setTimeout(function(){L.circle(dest,{radius:m.radius_m,color:'#38bdf8',weight:1,fillColor:'#38bdf8',fillOpacity:.18}).addTo(map);
+L.marker(dest,{icon:L.divIcon({className:'',html:'<div class="rs-pin"></div>',iconSize:[18,18],iconAnchor:[9,9]})}).addTo(map)
+.bindTooltip('Approximate area: '+m.city+', '+m.region+' (from number registration, not live location)');},rm?0:300+m.nodes.length*500);};</script>{% endif %}</div>
 <noscript><style>#result{display:block!important}#countdown,#show-btn{display:none}</style></noscript>
 <script>(function(){var n={{cd}},el=document.getElementById('cd-n'),b=document.getElementById('show-btn'),p=document.getElementById('countdown');
-function reveal(){document.getElementById('result').style.display='block';if(window.drawMap)setTimeout(drawMap,50);b.style.display='none';p.textContent='Your result is ready.';}
-b.onclick=reveal;var t=setInterval(function(){n--;if(n>0){el.textContent=n;}else{clearInterval(t);p.textContent='Your result is ready.';b.disabled=false;reveal();}},1000);})();</script>{% endif %}""", err=err, r=result, m=map_data(result["location"]) if result else None), status
+function reveal(){document.getElementById('result').style.display='block';if(window.drawMap)requestAnimationFrame(function(){drawMap();});b.style.display='none';p.textContent='Your result is ready.';}
+b.onclick=reveal;var t=setInterval(function(){n--;if(n>0){el.textContent=n;}else{clearInterval(t);p.textContent='Your result is ready.';b.disabled=false;reveal();}},1000);})();</script>{% endif %}""", err=err, r=result, m=map_data(result["npa"]) if result else None), status
 
 @app.route("/history")
 def history():

@@ -1,11 +1,17 @@
 """RingSleuth STAGING prototype. Mock data only. No real Twilio/Stripe calls."""
 import calendar, hashlib, os, sqlite3
 from datetime import date, datetime
-from flask import Flask, g, redirect, render_template_string, request, session, url_for
+from flask import Flask, Response, abort, g, redirect, render_template_string, request, session, url_for
 from werkzeug.security import check_password_hash, generate_password_hash
 
 LOOKUP_CAP = 50
 PRICE = "4.99"
+COUNTDOWN_SECONDS = 15
+
+def adsense():
+    """AdSense config from env; ads load only when both are set and valid."""
+    c, s = os.environ.get("ADSENSE_CLIENT", "").strip(), os.environ.get("ADSENSE_SLOT", "").strip()
+    return (c, s) if c.startswith("ca-pub-") and s.isdigit() else (None, None)
 
 # ---------- billing cycle logic ----------
 def add_months(d, n, anchor_day):
@@ -80,7 +86,11 @@ body{font-family:system-ui;max-width:760px;margin:auto;padding:20px;background:#
 a{color:#38bdf8}.card{background:#1e293b;padding:18px;border-radius:12px;margin:14px 0}
 input,button{padding:9px;border-radius:8px;border:0;margin:4px 0}button{background:#38bdf8;font-weight:bold;cursor:pointer}
 .banner{background:#facc15;color:#000;padding:6px;text-align:center;border-radius:6px}.err{background:#7f1d1d;padding:12px;border-radius:8px}
-table{width:100%}td{padding:4px}</style></head><body>
+table{width:100%}td{padding:4px}
+.ad{background:#0b1222;border:1px dashed #475569;border-radius:10px;padding:10px;margin:12px 0;min-height:120px;text-align:center}
+.adlabel{font-size:11px;color:#94a3b8;text-transform:uppercase;letter-spacing:1px}
+#countdown{font-size:20px;font-weight:bold;text-align:center}</style>
+{% if ad_client %}<script async src="https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js?client={{ad_client}}" crossorigin="anonymous"></script>{% endif %}</head><body>
 <div class=banner>DEMO / TEST MODE — no real charges · sample data only</div>
 <h1>📞 RingSleuth</h1><nav><a href="/">Home</a> · {% if u %}<a href="/lookup">Lookup</a> · <a href="/history">History</a> · <a href="/logout">Log out ({{u.email}})</a>{% else %}<a href="/signup">Sign up</a> · <a href="/login">Log in</a>{% endif %}</nav>
 {% if u and u.sub_start %}<p><b>{{used}} of 50 lookups used</b> this cycle · resets {{reset}}</p>{% endif %}
@@ -90,7 +100,8 @@ def page(body, **kw):
     u = user(); used = reset = None
     if u and u["sub_start"]:
         used, r = usage(u); reset = r.strftime("%B %-d, %Y")
-    return render_template_string(BASE, body=render_template_string(body, u=u, **kw), u=u, used=used, reset=reset)
+    ac, asl = adsense()
+    return render_template_string(BASE, body=render_template_string(body, u=u, ad_client=ac, ad_slot=asl, cd=COUNTDOWN_SECONDS, **kw), u=u, used=used, reset=reset, ad_client=ac)
 
 @app.route("/")
 def home():
@@ -158,8 +169,17 @@ def lookup():
     status = 429 if err and "limit resets" in err else 200
     return page("""<div class=card><form method=post><input name=number placeholder="(555) 123-4567" required> <button>Look up</button></form></div>
 {% if err %}<p class=err id=error>{{err}}</p>{% endif %}
-{% if r %}<div class=card><h3>{{r.number}}</h3><table><tr><td>Caller ID</td><td>{{r.caller_name}}</td></tr><tr><td>Carrier</td><td>{{r.carrier}}</td></tr>
-<tr><td>Line type</td><td>{{r.line_type}}</td></tr><tr><td>Location</td><td>{{r.location}}</td></tr><tr><td>Spam risk</td><td>{{r.risk}} ({{r.spam_score}}/100)</td></tr></table><small>{{r.source}}</small></div>{% endif %}""", err=err, r=result), status
+{% if r %}<div class=card id=interstitial><p id=countdown>Your result is ready in <span id=cd-n>{{cd}}</span>…</p>
+<p style="text-align:center"><button id=show-btn type=button disabled>Show result</button></p>
+<div class=ad id=ad-slot><div class=adlabel>Advertisement</div>
+{% if ad_client %}<ins class="adsbygoogle" style="display:block" data-ad-client="{{ad_client}}" data-ad-slot="{{ad_slot}}" data-ad-format="auto" data-full-width-responsive="true"></ins><script>(adsbygoogle=window.adsbygoogle||[]).push({});</script>
+{% else %}<p id=ad-placeholder style="color:#64748b;padding-top:30px">Ad space (placeholder — no ad network configured)</p>{% endif %}</div></div>
+<div class=card id=result style="display:none"><h3>{{r.number}}</h3><table><tr><td>Caller ID</td><td>{{r.caller_name}}</td></tr><tr><td>Carrier</td><td>{{r.carrier}}</td></tr>
+<tr><td>Line type</td><td>{{r.line_type}}</td></tr><tr><td>Location</td><td>{{r.location}}</td></tr><tr><td>Spam risk</td><td>{{r.risk}} ({{r.spam_score}}/100)</td></tr></table><small>{{r.source}}</small></div>
+<noscript><style>#result{display:block!important}#countdown,#show-btn{display:none}</style></noscript>
+<script>(function(){var n={{cd}},el=document.getElementById('cd-n'),b=document.getElementById('show-btn'),p=document.getElementById('countdown');
+function reveal(){document.getElementById('result').style.display='block';b.style.display='none';p.textContent='Your result is ready.';}
+b.onclick=reveal;var t=setInterval(function(){n--;if(n>0){el.textContent=n;}else{clearInterval(t);p.textContent='Your result is ready.';b.disabled=false;reveal();}},1000);})();</script>{% endif %}""", err=err, r=result), status
 
 @app.route("/history")
 def history():
@@ -169,6 +189,13 @@ def history():
     rows = [dict(json.loads(x["result"]), ts=x["ts"]) for x in db().execute("SELECT * FROM lookups WHERE user_id=? ORDER BY id DESC", (u["id"],))]
     return page("""<div class=card><h2>Lookup history</h2>{% if not rows %}<p>No lookups yet.</p>{% endif %}<table>
 {% for r in rows %}<tr><td>{{r.ts}}</td><td>{{r.number}}</td><td>{{r.caller_name}}</td><td>{{r.line_type}}</td><td>{{r.risk}}</td></tr>{% endfor %}</table></div>""", rows=rows)
+
+@app.route("/ads.txt")
+def ads_txt():
+    c, _ = adsense()
+    c = c or (os.environ.get("ADSENSE_CLIENT", "").strip() if os.environ.get("ADSENSE_CLIENT", "").startswith("ca-pub-") else None)
+    if not c: abort(404)
+    return Response(f"google.com, {c.replace('ca-', '', 1)}, DIRECT, f08c47fec0942fa0\n", mimetype="text/plain")
 
 if __name__ == "__main__":
     app.run(host="127.0.0.1", port=int(os.environ.get("PORT", 5055)))

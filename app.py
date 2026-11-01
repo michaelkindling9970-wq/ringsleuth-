@@ -146,7 +146,7 @@ table{width:100%}td{padding:4px}.logo{font-size:28px;font-weight:bold;margin:14p
 <div class=banner>DEMO / TEST MODE — no real charges</div>
 <div class=logo><a href="/" style="color:inherit;text-decoration:none"><img src="/favicon.svg" alt="RingSleuth logo" width=28 height=28 style="vertical-align:middle"> RingSleuth</a></div><nav><a href="/">Home</a> · <a href="/area-code/">Area codes</a> · {% if u %}<a href="/lookup">Lookup</a> · <a href="/history">History</a> · <a href="/logout">Log out ({{u.email}})</a>{% else %}<a href="/signup">Sign up</a> · <a href="/login">Log in</a>{% endif %}</nav>
 {% if u and u.sub_start %}<p><b>{{used}} of 50 lookups used</b> this cycle · resets {{reset}}</p>{% endif %}
-{{ body|safe }}<footer>RingSleuth is a caller-ID &amp; spam check, not a people-search service. We never name private individuals and never charge to remove listings. · <a href="/area-code/">Area code directory</a></footer></body></html>"""
+{{ body|safe }}<footer>RingSleuth is a caller-ID &amp; spam check, not a people-search service. We never name private individuals and never charge to remove listings. · <a href="/area-code/">Area code directory</a><br><small>RingSleuth is not a consumer reporting agency under the Fair Credit Reporting Act (15 U.S.C. §1681 et seq.). Use it only for lawful purposes. You may not use it to decide anyone's eligibility for employment, housing, credit, insurance or any other FCRA purpose, and we may close accounts that do.</small></footer></body></html>"""
 
 def seo_ctx(title, desc, path=None, jsonld=(), index=True, leaflet=False):
     root = (os.environ.get("SITE_URL") or request.url_root).rstrip("/")

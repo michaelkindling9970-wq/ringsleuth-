@@ -8,6 +8,7 @@ def client(tmp_path):
     c = A.app.test_client()
     c.post("/signup", data={"email": "m@x.com", "password": "secret1"})
     c.post("/checkout", data={"card": "4242 4242 4242 4242"})
+    c.post("/lookup/gate")
     return c
 
 def do(c, n="2125550100"): return c.post("/lookup", data={"number": n})
@@ -132,6 +133,7 @@ def test_checkout_on_mocked(tmp_path, monkeypatch):
         kw = fake.checkout.Session.create.call_args.kwargs
         assert kw["mode"] == "subscription" and kw["line_items"][0]["price_data"]["unit_amount"] == 499
         assert c.post("/lookup", data={"number": "2125550100"}).status_code == 302
+        c.post("/lookup/gate")
         ev = {"type": "checkout.session.completed", "data": {"object": {"client_reference_id": kw["client_reference_id"]}}}
         assert c.post("/stripe/webhook", json=ev).status_code == 200
         assert c.post("/lookup", data={"number": "2125550100"}).status_code == 200
@@ -181,3 +183,15 @@ def test_real_phonenumber_fields(ftcdb):
 def test_ftc_stale_logic(ftcdb):
     assert not A.ftc_data.stale(ftcdb)
     assert A.ftc_data.stale(ftcdb + ".missing")
+
+def test_fcra_gate(tmp_path, monkeypatch):
+    monkeypatch.setenv("DATA_DIR", str(tmp_path))
+    A.app.config.update(DATABASE=str(tmp_path / "g.db"), TESTING=True)
+    c = A.app.test_client(); c.post("/signup", data={"email": "g@x.com", "password": "secret1"})
+    c.post("/checkout", data={"card": "4242 4242 4242 4242"})
+    r = c.post("/lookup", data={"number": "2125550100"}); assert r.status_code == 302 and r.headers["Location"].endswith("/lookup/gate")
+    assert A.GATE_NOTICE in c.get("/lookup/gate").get_data(as_text=True)
+    c.post("/lookup/gate")
+    assert c.post("/lookup", data={"number": "2125550100"}).status_code == 200
+    files = list((tmp_path / "gate_records").rglob("*.txt")); assert len(files) == 1
+    txt = files[0].read_text(); assert "g@x.com" in txt and A.GATE_NOTICE in txt and A.GATE_BUTTON in txt

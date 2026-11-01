@@ -111,6 +111,8 @@ def db():
         g.db = sqlite3.connect(app.config["DATABASE"]); g.db.row_factory = sqlite3.Row
         g.db.executescript("""CREATE TABLE IF NOT EXISTS users(id INTEGER PRIMARY KEY, email TEXT UNIQUE, pw TEXT, sub_start TEXT);
         CREATE TABLE IF NOT EXISTS lookups(id INTEGER PRIMARY KEY, user_id INT, number TEXT, result TEXT, day TEXT, ts TEXT);""")
+        try: g.db.execute("ALTER TABLE users ADD COLUMN fcra_ack TEXT")
+        except sqlite3.OperationalError: pass
     return g.db
 
 @app.teardown_appcontext
@@ -144,7 +146,7 @@ table{width:100%}td{padding:4px}.logo{font-size:28px;font-weight:bold;margin:14p
 <div class=banner>DEMO / TEST MODE — no real charges</div>
 <div class=logo><a href="/" style="color:inherit;text-decoration:none"><img src="/favicon.svg" alt="RingSleuth logo" width=28 height=28 style="vertical-align:middle"> RingSleuth</a></div><nav><a href="/">Home</a> · <a href="/area-code/">Area codes</a> · {% if u %}<a href="/lookup">Lookup</a> · <a href="/history">History</a> · <a href="/logout">Log out ({{u.email}})</a>{% else %}<a href="/signup">Sign up</a> · <a href="/login">Log in</a>{% endif %}</nav>
 {% if u and u.sub_start %}<p><b>{{used}} of 50 lookups used</b> this cycle · resets {{reset}}</p>{% endif %}
-{{ body|safe }}<footer>RingSleuth is a caller-ID &amp; spam check, not a people-search service. We never name private individuals and never charge to remove listings. · <a href="/area-code/">Area code directory</a><br>Not for screening tenants, employees or job applicants, and not a consumer report under the FCRA.</footer></body></html>"""
+{{ body|safe }}<footer>RingSleuth is a caller-ID &amp; spam check, not a people-search service. We never name private individuals and never charge to remove listings. · <a href="/area-code/">Area code directory</a></footer></body></html>"""
 
 def seo_ctx(title, desc, path=None, jsonld=(), index=True, leaflet=False):
     root = (os.environ.get("SITE_URL") or request.url_root).rstrip("/")
@@ -260,11 +262,37 @@ def checkout():
     return page("""<div class=card><h1>Subscribe — ${{price}}/month</h1><p>Stripe <b>TEST MODE (mocked)</b>. Use 4242 4242 4242 4242, any future date, any CVC.</p>
 <form method=post><input name=card placeholder="Card number" value="4242 4242 4242 4242"><br><input placeholder="MM/YY" value="12/30"> <input placeholder=CVC value=123><br><button>Pay ${{price}} (test)</button></form></div>""", price=PRICE, seo=seo_ctx("Checkout (test mode) | RingSleuth", "Test-mode checkout.", index=False))
 
+GATE_VERSION = "2026-11-01.1"
+GATE_NOTICE = "RingSleuth may not be used to screen tenants, employees or job applicants, or for any purpose covered by the Fair Credit Reporting Act."
+GATE_BUTTON = "I understand \u2014 continue to lookup"
+
+def gate_dir():
+    return os.path.join(os.environ.get("DATA_DIR") or os.path.dirname(app.config["DATABASE"]), "gate_records")
+
+@app.route("/lookup/gate", methods=["GET", "POST"])
+def lookup_gate():
+    u = user()
+    if not u: return redirect("/login")
+    if request.method == "POST":
+        import uuid
+        now = datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"); eid = uuid.uuid4().hex[:12]
+        d = os.path.join(gate_dir(), str(u["id"])); os.makedirs(d, exist_ok=True)
+        with open(os.path.join(d, f"{now.replace(':', '')}_{eid}.txt"), "w") as f:
+            f.write(f"RingSleuth FCRA use-restriction gate: CLICKED\nEvent ID: {eid}\nAccount ID: {u['id']}\nAccount email: {u['email']}\n"
+                    f"Timestamp (UTC): {now}\nButton clicked: {GATE_BUTTON}\nNotice version: {GATE_VERSION}\n"
+                    f"Notice text displayed: {GATE_NOTICE}\nButton text displayed: {GATE_BUTTON}\n")
+        session["fcra_ack"] = GATE_VERSION
+        db().execute("UPDATE users SET fcra_ack=? WHERE id=?", (f"{GATE_VERSION} {now}", u["id"])); db().commit()
+        return redirect("/lookup")
+    return page("""<div class=card id=fcra-gate><h1>Before you look up a number</h1><p><b>{{n}}</b></p>
+<form method=post><button>{{b}}</button></form></div>""", n=GATE_NOTICE, b=GATE_BUTTON, seo=seo_ctx("Before you look up | RingSleuth", "Use restrictions.", index=False))
+
 @app.route("/lookup", methods=["GET", "POST"])
 def lookup():
     u = user()
     if not u: return redirect("/login")
     if not u["sub_start"]: return redirect("/checkout")
+    if session.get("fcra_ack") != GATE_VERSION and not (u["fcra_ack"] or "").startswith(GATE_VERSION): return redirect("/lookup/gate")
     used, reset = usage(u); result = err = None
     if request.method == "POST":
         if used >= LOOKUP_CAP:

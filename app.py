@@ -103,7 +103,7 @@ lookup_provider = RealLookup()
 # ---------- app/db ----------
 app = Flask(__name__)
 if os.environ.get("FTC_AUTOREFRESH", "1") == "1": ftc_data.ensure_fresh_async()  # lazy: only if missing or >7 days old
-app.config.update(SECRET_KEY=os.environ.get("SECRET_KEY") or os.urandom(32).hex(), DATABASE=os.path.join(os.path.dirname(__file__), "ringsleuth.db"))
+app.config.update(SECRET_KEY=os.environ.get("SECRET_KEY") or os.urandom(32).hex(), DATABASE=os.path.join(os.environ.get("DATA_DIR") or os.path.dirname(__file__), "ringsleuth.db"))
 today_fn = date.today  # overridable in tests
 
 def db():

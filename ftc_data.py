@@ -11,7 +11,7 @@ from collections import Counter
 from datetime import date, datetime, timedelta
 
 log = logging.getLogger("ringsleuth.ftc")
-DB_PATH = os.environ.get("FTC_DB") or os.path.join(os.path.dirname(os.path.abspath(__file__)), "ftc.db")
+DB_PATH = os.environ.get("FTC_DB") or os.path.join(os.environ.get("DATA_DIR") or os.path.dirname(os.path.abspath(__file__)), "ftc.db")
 URL = "https://search.ftc.gov/sites/default/files/DNC_Complaint_Numbers_{}.csv"
 WINDOW_DAYS = int(os.environ.get("FTC_WINDOW_DAYS", "45"))
 MAX_AGE_DAYS = 7
